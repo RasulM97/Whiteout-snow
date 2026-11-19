@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { COLORS, GAME } from "./config";
 import { groundHeight, type CircleZone, type SnowField } from "./snow";
 import type { CoreId, Language } from "./types";
@@ -17,6 +19,118 @@ const CORE_DATA = [
 function seeded(seed: number): () => number {
   return () => { seed |= 0; seed = seed + 0x6d2b79f5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
 }
+function mergedGeometry(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  const geometry = mergeGeometries(parts, false);
+  if (!geometry) throw new Error("Structure geometry merge failed");
+  for (const part of parts) part.dispose();
+  return geometry;
+}
+function fabPart(parent: THREE.Group, geometry: THREE.BufferGeometry, material: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh {
+  const part = new THREE.Mesh(geometry, material);
+  part.position.set(x, y, z);
+  parent.add(part);
+  return part;
+}
+function fabBox(w: number, h: number, d: number, r = 0.08): THREE.BufferGeometry {
+  return new RoundedBoxGeometry(w, h, d, 2, Math.min(r, w * 0.45, h * 0.45, d * 0.45));
+}
+function fabArm(parent: THREE.Group, material: THREE.Material, ax: number, ay: number, az: number, bx: number, by: number, bz: number, radius: number): void {
+  const dir = new THREE.Vector3(bx - ax, by - ay, bz - az);
+  const length = dir.length();
+  const limb = fabPart(parent, new THREE.CapsuleGeometry(radius, Math.max(0.04, length - radius * 2), 3, 8), material, (ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
+  limb.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.multiplyScalar(1 / length));
+}
+function assembleFabricator(cream: THREE.Material, dark: THREE.Material, cavity: THREE.Material, orange: THREE.Material, workpiece: THREE.Material): THREE.Group {
+  const group = new THREE.Group();
+  group.rotation.y = 0.42;
+  const chassis = fabPart(group, new THREE.SphereGeometry(1, 28, 18), cream, 0.02, 0.36, 0.04);
+  chassis.scale.set(0.9, 0.26, 0.5);
+  const belly = fabPart(group, new THREE.CapsuleGeometry(0.16, 0.8, 4, 10), dark, 0, 0.22, 0);
+  belly.rotation.z = Math.PI / 2;
+  for (const [x, z] of [[-0.48, -0.06], [0.52, 0.16]] as const) {
+    fabPart(group, new THREE.CylinderGeometry(0.15, 0.18, 0.08, 14), orange, x, 0.07, z);
+    const ankle = fabPart(group, new THREE.TorusGeometry(0.16, 0.026, 8, 14), dark, x, 0.11, z);
+    ankle.rotation.x = Math.PI / 2;
+  }
+  const rear = fabPart(group, new THREE.SphereGeometry(1, 26, 16), cream, -0.04, 0.96, -0.34);
+  rear.scale.set(0.78, 0.56, 0.32);
+  const leftCheek = fabPart(group, new THREE.SphereGeometry(1, 22, 14), cream, -0.55, 0.98, 0.08);
+  leftCheek.scale.set(0.26, 0.5, 0.4);
+  const rightCheek = fabPart(group, new THREE.SphereGeometry(1, 22, 14), cream, 0.52, 0.58, 0.08);
+  rightCheek.scale.set(0.3, 0.34, 0.4);
+  fabArm(group, cream, -0.46, 1.32, -0.08, 0.16, 1.18, 0.1, 0.17);
+  fabArm(group, cream, -0.42, 0.62, 0.02, -0.08, 0.42, 0.02, 0.18);
+  fabPart(group, fabBox(0.7, 0.58, 0.18, 0.05), cavity, -0.02, 0.94, 0.08);
+  fabPart(group, fabBox(0.64, 0.08, 0.4, 0.03), cavity, -0.02, 0.66, 0.18);
+  const hinge = fabPart(group, new THREE.CylinderGeometry(0.055, 0.055, 0.7, 14), orange, -0.16, 1.34, -0.02);
+  hinge.rotation.z = Math.PI / 2;
+  for (const x of [-0.5, 0.18]) {
+    const collar = fabPart(group, new THREE.TorusGeometry(0.1, 0.028, 8, 14), dark, x, 1.34, -0.02);
+    collar.rotation.y = Math.PI / 2;
+  }
+  const hopper = fabPart(group, new THREE.CapsuleGeometry(0.16, 0.16, 4, 12), cream, -0.86, 0.84, -0.02);
+  hopper.rotation.z = Math.PI / 2;
+  const band = fabPart(group, new THREE.TorusGeometry(0.175, 0.03, 8, 16), orange, -0.9, 0.84, -0.02);
+  band.rotation.y = Math.PI / 2;
+  const neck = fabPart(group, new THREE.TorusGeometry(0.18, 0.04, 8, 16), dark, -0.68, 0.86, 0);
+  neck.rotation.y = Math.PI / 2;
+  const throat = fabPart(group, new THREE.CylinderGeometry(0.08, 0.1, 0.18, 12), dark, -0.56, 0.88, 0.06);
+  throat.rotation.z = Math.PI / 2;
+  const blank = fabPart(group, fabBox(0.44, 0.32, 0.3, 0.07), workpiece, -0.02, 0.92, 0.32);
+  blank.rotation.y = 0.12;
+  const groove = fabPart(group, fabBox(0.46, 0.04, 0.32, 0.012), cavity, -0.02, 0.92, 0.32);
+  groove.rotation.y = 0.12;
+  fabPart(group, new THREE.CylinderGeometry(0.055, 0.07, 0.18, 12), orange, -0.02, 1.18, 0.3);
+  const spindleRing = fabPart(group, new THREE.TorusGeometry(0.1, 0.026, 8, 14), dark, -0.02, 1.26, 0.3);
+  spindleRing.rotation.x = Math.PI / 2;
+  fabPart(group, new THREE.SphereGeometry(0.13, 12, 10), dark, -0.3, 1.04, 0.24);
+  const leftSocket = fabPart(group, new THREE.TorusGeometry(0.15, 0.03, 8, 14), dark, -0.3, 1.04, 0.3);
+  leftSocket.rotation.y = 0.5;
+  fabArm(group, orange, -0.3, 1.04, 0.24, -0.58, 1.18, 0.42, 0.105);
+  fabPart(group, new THREE.SphereGeometry(0.11, 12, 8), dark, -0.58, 1.18, 0.42);
+  fabArm(group, orange, -0.58, 1.18, 0.42, -0.14, 0.96, 0.36, 0.09);
+  const leftA = fabPart(group, fabBox(0.1, 0.22, 0.14, 0.03), orange, -0.18, 0.84, 0.4);
+  leftA.rotation.z = 0.55;
+  const leftB = fabPart(group, fabBox(0.1, 0.2, 0.12, 0.03), orange, -0.12, 1.02, 0.28);
+  leftB.rotation.z = -0.4;
+  fabPart(group, new THREE.SphereGeometry(0.12, 12, 8), dark, 0.16, 0.74, 0.24);
+  const rightSocket = fabPart(group, new THREE.TorusGeometry(0.14, 0.028, 8, 14), dark, 0.16, 0.74, 0.3);
+  rightSocket.rotation.x = 1;
+  fabArm(group, orange, 0.16, 0.74, 0.24, 0.42, 0.64, 0.42, 0.095);
+  fabPart(group, new THREE.SphereGeometry(0.1, 10, 8), dark, 0.42, 0.64, 0.42);
+  fabArm(group, orange, 0.42, 0.64, 0.42, 0.08, 0.9, 0.36, 0.085);
+  const rightA = fabPart(group, fabBox(0.09, 0.18, 0.12, 0.03), orange, 0.12, 0.8, 0.4);
+  rightA.rotation.z = -0.5;
+  const rightB = fabPart(group, fabBox(0.08, 0.16, 0.11, 0.025), orange, 0.06, 0.98, 0.3);
+  rightB.rotation.z = 0.35;
+  fabPart(group, fabBox(0.36, 0.07, 0.28, 0.03), orange, 0.5, 0.4, 0.22);
+  fabPart(group, fabBox(0.09, 0.18, 0.32, 0.03), cream, 0.32, 0.5, 0.24);
+  fabPart(group, fabBox(0.09, 0.16, 0.3, 0.03), cream, 0.68, 0.48, 0.22);
+  fabPart(group, fabBox(0.3, 0.1, 0.08, 0.025), cavity, 0.5, 0.48, 0.12);
+  fabPart(group, fabBox(0.2, 0.12, 0.16, 0.035), workpiece, 0.5, 0.46, 0.26);
+  return group;
+}
+function takeFabricator(root: THREE.Group, material: THREE.Material): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  root.updateMatrixWorld(true);
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh) || object.material !== material) return;
+    const geometry = object.geometry.clone();
+    geometry.applyMatrix4(object.matrixWorld);
+    parts.push(geometry);
+  });
+  return mergeFabricator(parts);
+}
+
+function mergeFabricator(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  const prepared = parts.map((part) => {
+    if (!part.index) return part;
+    const flat = part.toNonIndexed();
+    part.dispose();
+    return flat;
+  });
+  return mergedGeometry(prepared);
+}
 export function mesh(geometry: THREE.BufferGeometry, material: THREE.Material, parent: THREE.Object3D, x = 0, y = 0, z = 0): THREE.Mesh {
   const m = new THREE.Mesh(geometry, material); m.position.set(x, y, z); m.castShadow = true; m.receiveShadow = true; parent.add(m); return m;
 }
@@ -25,7 +139,9 @@ function paintLabel(sprite: THREE.Sprite, text: string, color: string): void {
   const ctx = canvas.getContext("2d")!; ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "rgba(9,31,39,.9)"; ctx.roundRect(8, 20, 496, 88, 26); ctx.fill();
   ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.stroke(); ctx.fillStyle = color;
-  let size = 38; do { ctx.font = `700 ${size}px system-ui`; size -= 2; } while (ctx.measureText(text).width > 448 && size > 20);
+  const lang = document.documentElement.lang;
+  const family = lang === "fa" ? "Vazirmatn" : lang === "zh-CN" ? '"Noto Sans SC"' : "Inter";
+  let size = 38; do { ctx.font = `700 ${size}px ${family}, sans-serif`; size -= 2; } while (ctx.measureText(text).width > 448 && size > 20);
   ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(text, 256, 65, 448); material.map!.needsUpdate = true;
 }
 function label(text: string, color = "#8ef5ed", key = "", index = -1): THREE.Sprite {
@@ -38,6 +154,7 @@ function label(text: string, color = "#8ef5ed", key = "", index = -1): THREE.Spr
 export class World {
   readonly group = new THREE.Group();
   readonly obstacles: CircleZone[] = [];
+  readonly vista: CircleZone[] = [];
   readonly cores: CoreEntity[] = [];
   readonly depotPos = new THREE.Vector3(GAME.depot.x, 0, GAME.depot.z);
   readonly fabricatorPos = new THREE.Vector3(GAME.fabricator.x, 0, GAME.fabricator.z);
@@ -111,20 +228,33 @@ export class World {
     mesh(new THREE.SphereGeometry(0.16, 10, 8), glow, aerial, 0, 0.88);
     this.obstacles.push({ x: 0, z: 15, r: 3.85 });
 
-    const depot = new THREE.Group(); depot.position.copy(this.depotPos); this.group.add(depot);
-    mesh(new THREE.CylinderGeometry(1.5, 1.75, 2.5, 16), cream, depot, 0, 1.25);
-    mesh(new THREE.CylinderGeometry(1.65, 1.65, 0.25, 16), new THREE.MeshStandardMaterial({ color: COLORS.orange, metalness: 0.3 }), depot, 0, 2.5);
-    mesh(new THREE.TorusGeometry(1.53, 0.1, 8, 24), glow, depot, 0, 1.4).rotation.x = Math.PI / 2;
-    for (let i = 0; i < 3; i++) mesh(new THREE.BoxGeometry(0.65, 0.55, 0.65), new THREE.MeshStandardMaterial({ color: 0x8bd9e2, transparent: true, opacity: 0.82, roughness: 0.2 }), depot, -0.8 + i * 0.8, 0.35, -1.65);
+    const depot = new THREE.Group(); depot.name = "sales-depot"; depot.position.copy(this.depotPos); this.group.add(depot);
+    const depotBase = new THREE.CylinderGeometry(1.62, 1.72, 0.36, 20); depotBase.translate(0, 0.18, 0);
+    const depotMouth = new THREE.CapsuleGeometry(0.28, 0.7, 3, 10); depotMouth.rotateZ(Math.PI / 2); depotMouth.translate(0, 0.72, -1.42);
+    mesh(mergedGeometry([depotBase, depotMouth]), dark, depot);
+    const depotBody = new THREE.CylinderGeometry(1.46, 1.58, 1.72, 20); depotBody.translate(0, 1.22, 0);
+    mesh(depotBody, cream, depot);
+    const depotDome = new THREE.SphereGeometry(1.42, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.5); depotDome.scale(1, 0.7, 1); depotDome.translate(0, 2.05, 0);
+    const depotAwning = new THREE.BoxGeometry(1.05, 0.08, 0.32); depotAwning.translate(0, 1.05, -1.5);
+    mesh(mergedGeometry([depotDome, depotAwning]), orange, depot);
+    const depotBand = new THREE.TorusGeometry(1.5, 0.07, 8, 28); depotBand.rotateX(Math.PI / 2); depotBand.translate(0, 1.62, 0);
+    const depotSlot = new THREE.BoxGeometry(0.78, 0.28, 0.08); depotSlot.translate(0, 0.72, -1.66);
+    mesh(mergedGeometry([depotBand, depotSlot]), glow, depot);
     const depotLabel = label("SALES DEPOT", "#ffcf78", "world.depot"); depotLabel.position.set(0, 3.65, 0); depot.add(depotLabel);
     this.addNavigationMarker(depot, 0xffb55f, 4.8);
     this.obstacles.push({ x: GAME.depot.x, z: GAME.depot.z, r: 1.8 });
 
-    const fab = new THREE.Group(); fab.position.copy(this.fabricatorPos); this.group.add(fab);
-    mesh(new THREE.BoxGeometry(2.1, 1.35, 1.45), dark, fab, 0, 0.72);
-    const screen = mesh(new THREE.BoxGeometry(1.65, 0.85, 0.08), glow, fab, 0, 1.25, -0.74); screen.rotation.x = -0.16;
-    for (const x of [-0.75, 0.75]) mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.65, 8), new THREE.MeshStandardMaterial({ color: COLORS.orange }), fab, x, 1.85, 0.4);
-    const fabLabel = label("TOOLS + GEAR", "#8ef5ed", "world.fabricator"); fabLabel.position.set(0, 3, 0); fab.add(fabLabel);
+    const fab = new THREE.Group(); fab.name = "fabricator"; fab.position.copy(this.fabricatorPos); this.group.add(fab);
+    const cavity = new THREE.MeshStandardMaterial({ color: 0x17313a, roughness: 0.62, metalness: 0.32 });
+    const workpiece = new THREE.MeshStandardMaterial({ color: 0xc9fbff, emissive: 0x1f8f9c, emissiveIntensity: 0.62, roughness: 0.24, metalness: 0.06 });
+    const assembled = assembleFabricator(cream, dark, cavity, orange, workpiece);
+    mesh(takeFabricator(assembled, cream), cream, fab);
+    mesh(takeFabricator(assembled, dark), dark, fab);
+    mesh(takeFabricator(assembled, cavity), cavity, fab);
+    mesh(takeFabricator(assembled, orange), orange, fab);
+    mesh(takeFabricator(assembled, workpiece), workpiece, fab);
+    assembled.traverse((object) => { if (object instanceof THREE.Mesh) object.geometry.dispose(); });
+    const fabLabel = label("TOOLS + GEAR", "#8ef5ed", "world.fabricator"); fabLabel.position.set(0, 2.55, 0); fab.add(fabLabel);
     this.addNavigationMarker(fab, COLORS.cyan, 4.25);
     this.obstacles.push({ x: GAME.fabricator.x, z: GAME.fabricator.z, r: 1.25 });
     const warm = new THREE.PointLight(COLORS.warm, 24, 18, 2); warm.position.set(0, 4, 10); this.group.add(warm);
@@ -166,15 +296,18 @@ export class World {
   }
 
   private buildDistricts(): void {
-    const shell = new THREE.MeshStandardMaterial({ color: 0xd3deda, roughness: 0.6, metalness: 0.18 });
+    const shell = new THREE.MeshStandardMaterial({ color: 0xd8e1dc, roughness: 0.55, metalness: 0.18 });
     const trim = new THREE.MeshStandardMaterial({ color: COLORS.orange, roughness: 0.45, metalness: 0.22 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x29434e, roughness: 0.5, metalness: 0.45 });
     const glass = new THREE.MeshStandardMaterial({ color: 0x72e2df, emissive: 0x227f87, emissiveIntensity: 1.1, roughness: 0.25 });
     for (const [x, z, yaw] of [[36.45, -10.8, 0.2], [43.2, 4.05, Math.PI / 2], [-36.45, 20.25, -0.25]] as const) {
       const hab = new THREE.Group(); hab.position.set(x, groundHeight(x, z), z); hab.rotation.y = yaw; this.group.add(hab);
-      const body = mesh(new THREE.CylinderGeometry(2.2, 2.2, 6.4, 20), shell, hab, 0, 2.35); body.rotation.z = Math.PI / 2;
-      for (const sx of [-2.7, 0, 2.7]) { const ring = mesh(new THREE.TorusGeometry(2.22, 0.14, 8, 24), trim, hab, sx, 2.35); ring.rotation.y = Math.PI / 2; }
-      for (const sx of [-1.7, 0, 1.7]) mesh(new THREE.BoxGeometry(0.95, 0.72, 0.12), glass, hab, sx, 2.55, -2.06);
-      for (const sx of [-2.3, 2.3]) mesh(new THREE.BoxGeometry(0.36, 1.1, 0.36), trim, hab, sx, 0.55);
+      const hull = mesh(new THREE.CapsuleGeometry(1.35, 3.1, 5, 12), shell, hab, 0, 1.7, 0); hull.rotation.z = Math.PI / 2;
+      const belly = mesh(new THREE.SphereGeometry(1.45, 16, 10), dark, hab, 0, 0.85, 0.15); belly.scale.set(1.7, 0.38, 0.85);
+      for (const sx of [-1.7, 0, 1.7]) { const rib = mesh(new THREE.TorusGeometry(1.4, 0.09, 8, 18), trim, hab, sx, 1.7, 0); rib.rotation.y = Math.PI / 2; }
+      for (const sx of [-1.15, 0.15, 1.35]) mesh(new THREE.BoxGeometry(0.62, 0.36, 0.12), glass, hab, sx, 1.78, 1.42);
+      mesh(new THREE.BoxGeometry(0.7, 0.9, 0.16), dark, hab, -0.2, 0.7, 1.32);
+      for (const sx of [-1.9, 1.9]) mesh(new THREE.CylinderGeometry(0.16, 0.22, 0.7, 8), trim, hab, sx, 0.35, 0.2);
       this.obstacles.push({ x, z, r: 3.65 });
     }
     for (const [x, z] of [[27, -37.8], [-47.25, -10.8], [37.8, 39.15], [-20.25, 47.25]] as const) this.addLamp(x, z);
@@ -198,12 +331,17 @@ export class World {
 
   setHeaterSitesVisible(visible: boolean): void { this.heaterSitesGroup.visible = visible; }
   setLanguage(language: Language): void {
-    this.group.traverse((object) => {
-      if (!(object instanceof THREE.Sprite) || !object.userData.translationKey) return;
-      const key = object.userData.translationKey as string;
-      const text = object.userData.labelIndex >= 0 ? `${translate(language, key)} ${object.userData.labelIndex + 1}` : translate(language, key);
-      paintLabel(object, text, object.userData.labelColor as string);
-    });
+    const paint = () => {
+      this.group.traverse((object) => {
+        if (!(object instanceof THREE.Sprite) || !object.userData.translationKey) return;
+        const key = object.userData.translationKey as string;
+        const text = object.userData.labelIndex >= 0 ? `${translate(language, key)} ${object.userData.labelIndex + 1}` : translate(language, key);
+        paintLabel(object, text, object.userData.labelColor as string);
+      });
+    };
+    paint();
+    const family = language === "fa" ? "700 38px Vazirmatn" : language === "zh" ? '700 38px "Noto Sans SC"' : "700 38px Inter";
+    void document.fonts.load(family).then(paint);
   }
 
   private buildNature(): void {
@@ -226,6 +364,7 @@ export class World {
       const a = random() * Math.PI * 2; const r = 32 + random() * 32; const s = 0.4 + random() * 1.1;
       const x = Math.sin(a) * r, z = Math.cos(a) * r;
       dummy.position.set(x, groundHeight(x, z) + s * 0.25, z); dummy.scale.set(s, s * 0.65, s * 0.85); dummy.rotation.set(random(), random() * 6, random()); dummy.updateMatrix(); rocks.setMatrixAt(i, dummy.matrix);
+      this.obstacles.push({ x, z, r: 0.72 * s });
     }
     rocks.castShadow = true; rocks.receiveShadow = true; this.group.add(rocks);
     const poleMat = new THREE.MeshStandardMaterial({ color: 0x536f77, metalness: 0.5 });
@@ -238,15 +377,19 @@ export class World {
   }
 
   private buildCores(): void {
+    const coreMat = new THREE.MeshStandardMaterial({ color: 0xe4ece6, emissive: COLORS.cyan, emissiveIntensity: 1.25, metalness: 0.5, roughness: 0.25 });
+    const collarMat = new THREE.MeshStandardMaterial({ color: COLORS.orange, metalness: 0.35, roughness: 0.42 });
+    const cradleMat = new THREE.MeshStandardMaterial({ color: 0x29434e, roughness: 0.5, metalness: 0.4 });
+    const beamMat = new THREE.MeshBasicMaterial({ color: COLORS.cyan, transparent: true, opacity: 0.16, depthWrite: false, blending: THREE.AdditiveBlending });
+    const diamondMat = new THREE.MeshBasicMaterial({ color: COLORS.cyan });
     for (const data of CORE_DATA) {
       const body = new THREE.Group(); body.position.set(data.x, groundHeight(data.x, data.z) + 0.32, data.z); this.group.add(body);
-      const coreMat = new THREE.MeshStandardMaterial({ color: 0xe4ece6, emissive: COLORS.cyan, emissiveIntensity: 1.25, metalness: 0.5, roughness: 0.25 });
-      const core = mesh(new THREE.CylinderGeometry(0.36, 0.36, 1.2, 12), coreMat, body); core.rotation.z = Math.PI / 2;
-      for (const x of [-0.5, 0.5]) { const ring = mesh(new THREE.TorusGeometry(0.39, 0.075, 8, 16), new THREE.MeshStandardMaterial({ color: COLORS.orange, metalness: 0.35 }), body, x, 0); ring.rotation.y = Math.PI / 2; }
+      mesh(new THREE.CylinderGeometry(0.48, 0.55, 0.14, 12), cradleMat, body, 0, -0.22, 0);
+      const core = mesh(new THREE.CapsuleGeometry(0.26, 0.46, 4, 10), coreMat, body, 0, 0.08, 0); core.rotation.z = Math.PI / 2;
+      for (const x of [-0.38, 0.38]) { const ring = mesh(new THREE.TorusGeometry(0.3, 0.055, 8, 14), collarMat, body, x, 0.08, 0); ring.rotation.y = Math.PI / 2; }
       const marker = new THREE.Group(); marker.position.set(data.x, groundHeight(data.x, data.z), data.z); this.group.add(marker);
-      const beamMat = new THREE.MeshBasicMaterial({ color: COLORS.cyan, transparent: true, opacity: 0.16, depthWrite: false, blending: THREE.AdditiveBlending });
       const beam = mesh(new THREE.CylinderGeometry(0.16, 0.75, 7, 12, 1, true), beamMat, marker, 0, 3.5); beam.castShadow = false;
-      const diamond = mesh(new THREE.OctahedronGeometry(0.3), new THREE.MeshBasicMaterial({ color: COLORS.cyan }), marker, 0, 5.1); diamond.castShadow = false;
+      const diamond = mesh(new THREE.OctahedronGeometry(0.3), diamondMat, marker, 0, 5.1); diamond.castShadow = false;
       body.visible = false; marker.visible = false;
       this.cores.push({ ...data, scanned: false, revealed: false, recovered: false, body, marker, beam: beamMat });
     }
@@ -257,7 +400,10 @@ export class World {
     const dummy = new THREE.Object3D();
     for (let i = 0; i < 32; i++) {
       const a = i / 32 * Math.PI * 2 + random() * 0.1; const r = 82 + random() * 25; const h = 0.7 + random() * 1.25;
-      dummy.position.set(Math.sin(a) * r, 4 * h, Math.cos(a) * r); dummy.scale.set(0.8 + random(), h, 0.8 + random()); dummy.rotation.y = random() * Math.PI; dummy.updateMatrix(); mountains.setMatrixAt(i, dummy.matrix);
+      const sx = 0.8 + random(); const sz = 0.8 + random();
+      const x = Math.sin(a) * r; const z = Math.cos(a) * r;
+      dummy.position.set(x, 4 * h, z); dummy.scale.set(sx, h, sz); dummy.rotation.y = random() * Math.PI; dummy.updateMatrix(); mountains.setMatrixAt(i, dummy.matrix);
+      this.vista.push({ x, z, r: 6 * Math.max(sx, sz) });
     }
     mountains.receiveShadow = true; this.group.add(mountains);
     const starGeo = new THREE.BufferGeometry(); const positions = new Float32Array(420 * 3);

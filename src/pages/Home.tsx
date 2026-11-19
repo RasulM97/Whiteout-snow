@@ -15,7 +15,7 @@ export default function Home() {
 
   return (
     <div id="game-root">
-      <canvas id="game-canvas" ref={canvasRef} aria-label="بازی سه‌بعدی ایستگاه برف‌زده" />
+      <canvas id="game-canvas" ref={canvasRef} aria-label="Whiteout Station" />
       <div id="ui-overlay" ref={overlayRef} />
     </div>
   )

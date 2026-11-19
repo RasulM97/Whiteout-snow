@@ -134,7 +134,14 @@ try {
   const audio = await debug(page, "audioState");
   assert(audio.context === "running" && audio.ambienceReady >= 2 && !audio.ambiencePaused && audio.repairReady >= 2 && audio.ambience === "arctic-ambience.mp3", "Web Audio, arctic ambience and repair chime are integrated and ready");
   await page.selectOption("#set-music-track", "none");
-  assert((await debug(page, "audioState")).musicPaused && !(await debug(page, "audioState")).ambiencePaused, "music None stops only music and leaves ambience playing");
+  const fading = await debug(page, "audioState");
+  await page.waitForFunction(() => {
+    const audio = window.__whiteoutDebug.audioState();
+    return audio.track === "none" && audio.musicPaused && !audio.ambiencePaused;
+  }, null, { timeout: 2500 });
+  const faded = await debug(page, "audioState");
+  assert(fading.track === "none" && !fading.ambiencePaused, "music None keeps ambience up during the fade");
+  assert(faded.track === "none" && faded.musicPaused && !faded.ambiencePaused, "music None finishes its 900 ms fade and leaves ambience playing");
   await page.click("#close-settings-btn"); if (await page.locator("#resume-btn").isVisible()) await page.click("#resume-btn");
   await context.close();
   if (process.env.JOURNEY_DESKTOP_ONLY === "1") {
@@ -176,10 +183,12 @@ try {
   // separately captured landscape/portrait frames are visually reviewed.
   console.log("PASS: mobile landscape input flow complete");
   await mp.setViewportSize({ width: 390, height: 844 }); await mp.waitForTimeout(400);
-  assert((await debug(mp, "snapshot")).state === "paused" && !(await mp.locator("#touch-controls").isVisible()), "rotating to portrait safely pauses and hides gameplay touch controls");
-  assert(await mp.locator("#orientation-lock").isVisible(), "portrait orientation presents the dedicated rotate-to-landscape screen");
-  await mp.setViewportSize({ width: 844, height: 390 }); await mp.waitForTimeout(250); await mp.tap("#resume-btn");
-  assert((await debug(mp, "snapshot")).state === "playing" && await mp.locator("#touch-controls").isVisible(), "returning to landscape resumes functional touch play");
+  assert((await debug(mp, "snapshot")).state === "playing" && !(await mp.locator("#touch-controls").isVisible()), "portrait keeps the operation running and hides the wide-screen stick");
+  const portraitBanner = await mp.locator("#orientation-lock").boundingBox();
+  assert(await mp.locator("#orientation-lock").isVisible() && portraitBanner && portraitBanner.height < 180 && portraitBanner.y < 90, "portrait shows a landscape recommendation that does not cover the station");
+  await mp.setViewportSize({ width: 844, height: 390 }); await mp.waitForTimeout(250);
+  if (await mp.locator("#resume-btn").isVisible()) await mp.tap("#resume-btn");
+  assert((await debug(mp, "snapshot")).state === "playing" && await mp.locator("#touch-controls").isVisible() && !(await mp.locator("#orientation-lock").isVisible()), "returning to landscape restores functional touch play");
   const overflow = await mp.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
   assert(!overflow, "mobile landscape interface has no horizontal page overflow");
   await mobile.close();

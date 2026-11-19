@@ -58,8 +58,9 @@ export class Effects {
     this.sprayPoints = new THREE.Points(this.sprayGeo, new THREE.PointsMaterial({ color: 0xe9fbff, size: 0.16, transparent: true, opacity: 0.85, depthWrite: false })); this.sprayPoints.frustumCulled = false; scene.add(this.sprayPoints);
     this.scanRing = new THREE.Mesh(new THREE.RingGeometry(0.93, 1, 64), new THREE.MeshBasicMaterial({ color: COLORS.cyan, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }));
     this.scanRing.rotation.x = -Math.PI / 2; scene.add(this.scanRing);
-    this.targetRing = new THREE.Mesh(new THREE.RingGeometry(0.88, 1, 48), new THREE.MeshBasicMaterial({ color: 0x087f89, transparent: true, opacity: 0.48, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
-    this.targetRing.rotation.x = -Math.PI / 2; this.targetRing.position.y = 0.09; scene.add(this.targetRing);
+    const aimMat = (color: number, opacity: number) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false, depthTest: false, toneMapped: false });
+    this.targetRing = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 56), aimMat(0x8ef6ea, 0.78));
+    this.targetRing.rotation.x = -Math.PI / 2; this.targetRing.position.y = 0.12; this.targetRing.renderOrder = 4; scene.add(this.targetRing);
 
     for (let i = 0; i < STREAK_POOL; i++) this.resetStreak(i, true);
     this.streakGeo.setAttribute("position", new THREE.BufferAttribute(this.streakPos, 3));
@@ -178,7 +179,21 @@ export class Effects {
       this.scanLife = Math.max(0, this.scanLife - dt * 0.55); const progress = 1 - this.scanLife;
       this.scanRing.scale.setScalar(0.2 + progress * 19); (this.scanRing.material as THREE.MeshBasicMaterial).opacity = this.scanLife * 0.65;
     }
-    const mat = this.targetRing.material as THREE.MeshBasicMaterial; mat.opacity = clearing ? 0.72 : 0.26;
+    const mat = this.targetRing.material as THREE.MeshBasicMaterial;
+    mat.opacity = clearing ? 0.9 : 0.62;
+  }
+  hideAim(): void { this.targetRing.visible = false; }
+  aimMarkers(): { ring: boolean; sweep: boolean; suction: boolean; lane: boolean; chevron: boolean; ringScale: number; ringX: number; ringZ: number } {
+    return {
+      ring: this.targetRing.visible, sweep: false, suction: false, lane: false, chevron: false,
+      ringScale: this.targetRing.scale.x, ringX: this.targetRing.position.x, ringZ: this.targetRing.position.z,
+    };
+  }
+  aim(_tool: string, _ox: number, _oz: number, tx: number, tz: number, y: number, radius: number, visible: boolean): void {
+    if (!visible) { this.hideAim(); return; }
+    this.targetRing.position.set(tx, y, tz);
+    this.targetRing.visible = true;
+    this.targetRing.scale.set(radius, radius, radius);
   }
   setParticles(enabled: boolean): void {
     this.particlesEnabled = enabled; this.snowPoints.visible = enabled; this.sprayPoints.visible = enabled;

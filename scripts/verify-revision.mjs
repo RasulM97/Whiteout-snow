@@ -63,9 +63,10 @@ try {
     }
   }
   for (let level = 1; level <= 4; level++) {
-    const brush = progression.brush[level - 1], vacuum = progression.vacuum[level - 1];
-    assert(vacuum.rate > brush.rate && vacuum.radius > brush.radius && vacuum.area > brush.area && vacuum.distance > brush.distance && vacuum.capacity > brush.capacity && vacuum.yield > brush.yield, `vacuum tier ${level} is strictly stronger than the same-tier brush`);
+    const hands = progression.hands[level - 1], shovel = progression.shovel[level - 1], brush = progression.brush[level - 1], blower = progression.blower[level - 1], vacuum = progression.vacuum[level - 1];
+    assert(hands.yield > vacuum.yield && vacuum.yield > brush.yield && hands.yield <= 1 && vacuum.rate > brush.rate && brush.radius > vacuum.radius && blower.distance > vacuum.distance && vacuum.capacity > brush.capacity && shovel.wade > vacuum.wade && shovel.focus > brush.focus && brush.film > vacuum.film && blower.heat < hands.heat && vacuum.pace < hands.pace, `tier ${level} keeps a separate job for each tool (${JSON.stringify({ hands, shovel, brush, blower, vacuum })})`);
   }
+  assert(progression.shovel[3].focus > progression.shovel[0].focus && progression.brush[3].radius > progression.brush[0].radius && progression.blower[3].distance > progression.blower[0].distance && progression.vacuum[3].rate > progression.vacuum[0].rate && progression.hands[3].yield > progression.hands[0].yield && progression.hands[3].wear < progression.hands[0].wear, "each upgrade improves that tool's own job");
   await debug("setQuest", 6); await page.click("#shop-btn");
   assert(await page.locator(".tool-tier-stats").count() === 5 && await page.locator(".tool-tier-stats").evaluateAll((nodes) => nodes.every((n) => n.textContent.trim().length > 20)) && (await page.locator("#tool-stats-hands").innerText()).includes("→"), "shop displays live statistics for every tool and current-to-next values for owned upgrades");
   await page.locator('[data-buy-tool="brush"]').click(); await page.locator('[data-buy-tool="vacuum"]').click();

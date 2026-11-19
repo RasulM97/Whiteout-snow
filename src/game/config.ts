@@ -26,7 +26,9 @@ export const GAME = {
   stormWarning: 12,
   stormDuration: 25,
   severeStormDuration: 38,
-  stormRegrowChance: 0.18,
+  stormRegrowChance: 0.055,
+  /** Map clearance that certifies the mission. Other victory terms stay separate. */
+  clearanceGoal: 95,
   baseCenter: { x: 0, z: 10 },
   baseHeatRadius: 9,
   basePowerRadius: 19,

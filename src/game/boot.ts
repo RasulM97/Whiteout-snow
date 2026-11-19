@@ -11,15 +11,16 @@ import { GameUI } from "./ui";
 import { storage } from "./storage";
 import { BUILDINGS, TOOLS, TOOL_CAPACITIES, TOOL_UPGRADES, UPGRADES, toolRepairCost, type BuildingType, type CargoKind, type EventEntry, type GameSnapshot, type LegacySave, type ObjectiveView, type PausePanel, type RobotZoneMode, type SaveData, type ScannerSignal, type SettingsView, type ToolId, type UpgradeId, type UpgradeLevels } from "./types";
 import { ModelLibrary } from "./models";
-import { BuildingSystem } from "./buildings";
-import { RailSystem } from "./rails";
+import { BuildingSystem, workAreaRadius } from "./buildings";
+import { RailSystem, type RailPathPoint } from "./rails";
+import type { NetEnd, NetPolicy, NetResult, NetSave, StrokeView } from "./rail-network";
 import { QUESTS } from "./quests";
-import { translate } from "./i18n";
+import { locale, translate } from "./i18n";
 import { PhysicsSystem } from "./physics";
 import { RelaySystem, type RelayId } from "./relays";
 import { CharacterAnimator } from "./character";
 import CameraControls from "camera-controls";
-import { toolTierStats } from "./tool-progression";
+import { toolClearRate, toolTierStats } from "./tool-progression";
 import { OpeningCinematic } from "./cinematic";
 import { InterfaceTutorial } from "./tutorial";
 import { disposeObject } from "./resources";
@@ -82,7 +83,7 @@ class WhiteoutGame {
   private desiredCamera = new THREE.Vector3(24, 23, 29); private cameraTarget = new THREE.Vector3(0, 0, 8); private currentTarget = new THREE.Vector3(0, 0, 8);
   private sun: THREE.DirectionalLight; private fog: THREE.Fog;
   private settings: SettingsView = { ...defaultSettings(), ...storage.get<Partial<SettingsView>>("settings-v2", {}) };
-  private upgrades = blankUpgrades(); private tools = blankTools(); private selectedTool: ToolId = "hands";
+  private upgrades = blankUpgrades(); private tools = blankTools(); private selectedTool: ToolId = "hands"; private debugClear = false;
   private toolHealth: Record<ToolId, number> = fullToolHealth();
   private salesHistory: Array<{ time: number; amount: number }> = [];
   private pausePanel: PausePanel = "menu"; private settingsReturnToPause = false; private raw = 0; private purified = 0; private ice = 0;
@@ -101,7 +102,23 @@ class WhiteoutGame {
   private gpuName = "unknown"; private lastFrameTime = performance.now(); private disposed = false; private cameraZoom = 1;
   private cameraAzimuth = Math.atan2(14, 18);
   private buildMode: BuildingType | "rail" | null = null; private railSource: number | null = null; private relocating: number | null = null;
-  private ghost = new THREE.Group(); private railPreview: THREE.Line;
+  private workDock: number | null = null; private workPoint: { x: number; z: number } | null = null; private workLocked = false; private workRing!: THREE.Mesh;
+  private railDraft: { sourceId: number; destinationId: number; controls: RailPathPoint[]; lane: number; paid: number; existing: boolean; selected: number | null } | null = null;
+  private networkDraft: { from: NetEnd; to: NetEnd; points: RailPathPoint[]; valid: boolean; cost: number; kind: CargoKind; sourceName: string; destinationName: string } | null = null;
+  private strokePlan: StrokeView | null = null;
+  private strokeRaw: RailPathPoint[] | null = null;
+  private stroke: RailPathPoint[] | null = null;
+  private strokeWasDown = false;
+  private drawArmed = true;
+  private editMode = false;
+  private anchor: RailPathPoint | null = null;
+  private selectedEdgeId: number | null = null;
+  private junctionArm: "merge" | "split" | null = null;
+  private selectedJunction: number | null = null;
+  private sharedArm = false;
+  private railDrag: { index: number; moved: boolean; wasSelected: boolean } | null = null;
+  private railHandles = new THREE.Group();
+  private ghost = new THREE.Group(); private railPreview: THREE.Line; private buildCursor: { x: number; z: number } | null = null;
   private shakeStrength = 0; private interactionAnim = 0; private stepDistance = 0; private footSide = 1; private lastFrozenCount = 0; private heatWarningArmed = true;
   private onResize = () => this.resize();
   private onVisibility = () => { this.tabHidden = document.hidden; if (document.hidden && this.state.is("playing")) this.pause(); };
@@ -167,8 +184,14 @@ class WhiteoutGame {
       start: () => this.startRun(), continue: () => this.continueRun(), resume: () => this.resume(), restart: () => this.startRun(), checkpoint: () => this.recoverCheckpoint(), pause: () => this.pause(),
       openUpgrades: () => this.openUpgrades(), openSettings: () => this.openSettings(), openRobots: () => this.openRobots(), openLog: () => this.openLog(), closePanel: () => this.closePanel(), mute: () => this.toggleMute(), tutorial: () => this.openTutorial(),
       scan: () => this.scan(), interact: () => this.interact(), buyUpgrade: (id) => this.buyUpgrade(id), buyBattery: () => this.buyBattery(), buyTool: (id) => this.buyTool(id), selectTool: (id) => this.selectTool(id), repairTool: (id) => this.repairTool(id),
-      selectBuild: (type) => this.selectBuild(type), selectRail: () => this.selectRail(), upgradeBuilding: () => this.upgradeNearest(),
+      selectBuild: (type) => this.selectBuild(type), selectRail: () => this.selectRail(), confirmRail: () => this.confirmRailDraft(), cancelRail: () => this.cancelRailDraft(), removeRailPoint: () => this.removeRailPoint(), upgradeBuilding: () => this.upgradeNearest(),
+      armDraw: () => { this.drawArmed = true; this.editMode = false; this.audio.sfx("ui"); this.updateUI(); },
+      editRail: () => this.beginRailEdit(),
+      extendRail: () => this.beginRailExtend(),
+      deleteRail: () => this.deleteSelectedRail(),
+      setJunctionPolicy: (policy, ratio) => { if (this.selectedJunction != null && this.rails.network.policy(this.selectedJunction, policy, ratio)) { this.saveGame(); this.updateUI(); } },
       moveBuilding: () => this.moveNearest(), demolishBuilding: () => this.demolishNearest(), repairBuilding: () => this.repairNearest(),
+      beginWorkArea: () => this.beginWorkArea(), confirmWorkArea: () => this.confirmWorkArea(), cancelWorkArea: () => this.cancelWorkArea(), clearWorkArea: () => this.clearNearestWorkArea(),
       buyExtraRobot: (buildingId) => { this.buyExtraRobot(buildingId); },
       robotZoneMode: (buildingId, slot, mode, chunkId) => { this.setRobotZoneMode(buildingId, slot, mode, chunkId); },
       robotRepairAllowed: (buildingId, slot, allowed) => { this.buildings.setRepairAllowed(buildingId, slot, allowed); this.saveGame(); this.updateUI(); },
@@ -188,8 +211,15 @@ class WhiteoutGame {
       },
     });
     this.ghost.visible = false; this.scene.add(this.ghost);
-    const lineGeo = new THREE.BufferGeometry(); lineGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(12), 3));
-    this.railPreview = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: COLORS.orange, transparent: true, opacity: 0.85 })); this.railPreview.visible = false; this.scene.add(this.railPreview);
+    const lineGeo = new THREE.BufferGeometry(); lineGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(96 * 3), 3));
+    this.railPreview = new THREE.Line(lineGeo, new THREE.LineDashedMaterial({ color: COLORS.orange, transparent: true, opacity: 0.95, dashSize: 0.4, gapSize: 0.28, depthTest: false })); this.railPreview.renderOrder = 6; this.railPreview.frustumCulled = false; this.railPreview.visible = false; this.scene.add(this.railPreview);
+    this.workRing = new THREE.Mesh(new THREE.RingGeometry(0.92, 1, 64), new THREE.MeshBasicMaterial({ color: 0x7dffe8, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthTest: false }));
+    this.workRing.rotation.x = -Math.PI / 2; this.workRing.visible = false; this.workRing.renderOrder = 6; this.scene.add(this.workRing);
+    this.railHandles.visible = false; this.scene.add(this.railHandles);
+    for (let i = 0; i < 10; i++) {
+      const handle = new THREE.Mesh(new THREE.SphereGeometry(0.62, 12, 10), new THREE.MeshBasicMaterial({ color: 0xffc56a, transparent: true, opacity: 0.95, depthTest: false }));
+      handle.visible = false; handle.renderOrder = 6; this.railHandles.add(handle);
+    }
     this.state.onChange((next) => {
       this.audio.setClearing(false); this.ui.showState(next, this.pausePanel);
       if (next === "victory" || next === "gameover") this.ui.showEnd(next === "victory", this.snapshot());
@@ -199,6 +229,14 @@ class WhiteoutGame {
     window.__gameProbe = () => ({ x: this.player.group.position.x, y: this.player.group.position.y, z: this.player.group.position.z });
     this.installDebug(); this.loop = new GameLoop({ update: (dt) => this.update(dt), render: (alpha) => this.render(alpha) }); this.loop.start();
     attachEngineer(this.models, this.player);
+    const grant = readLaunchCreditGrant();
+    if (grant != null) {
+      if (this.hasSave) this.continueRun();
+      else this.startRun(false);
+      this.credits = grant;
+      this.updateUI();
+      this.saveGame();
+    }
   }
 
   private t(key: string): string { return translate(this.settings.language, key); }
@@ -226,7 +264,7 @@ class WhiteoutGame {
   private get heatFactor(): number { return [1, 0.78, 0.62, 0.48][this.upgrades.thermal]; }
 
   private resetRun(): void {
-    this.cancelBuild(); this.upgrades = blankUpgrades(); this.tools = blankTools(); this.toolHealth = fullToolHealth(); this.salesHistory = []; this.saleRemainder = 0; this.selectedTool = "hands";
+    this.finishWorkAim(); this.cancelBuild(); this.debugClear = false; this.upgrades = blankUpgrades(); this.tools = blankTools(); this.toolHealth = fullToolHealth(); this.salesHistory = []; this.saleRemainder = 0; this.selectedTool = "hands";
     this.raw = 0; this.purified = 0; this.ice = 0; this.credits = 0; this.heat = 100; this.power = 15; this.recovered = 0;
     this.produced = 0; this.collectedRaw = 0; this.purifiedSold = 0; this.iceSold = 0; this.sold = 0; this.rawSold = 0; this.railDelivered = 0; this.questIndex = 0; this.cleanupCertified = false; this.heatWarningArmed = true;
     this.runTime = 0; this.visualTime = 0; this.walkTime = 0; this.scannerCooldown = 0; this.radarCharges = 3; this.nextStormAt = GAME.firstStormAt;
@@ -238,7 +276,7 @@ class WhiteoutGame {
     this.player.group.position.set(GAME.spawn.x, this.snow.heightAt(GAME.spawn.x, GAME.spawn.z), GAME.spawn.z); this.player.group.rotation.y = Math.PI;
     this.previousPose.position.copy(this.player.group.position); this.currentPose.position.copy(this.player.group.position); this.previousPose.yaw = this.currentPose.yaw = Math.PI;
     this.physics.reset(GAME.spawn.x, GAME.spawn.z); this.player.nozzle.scale.set(1, 1, 1); this.player.nozzle.rotation.set(0, 0, 0);
-    this.facing.set(0, 0, -1); this.effects.targetRing.visible = false; this.input?.resetAll(); this.audio.setStorm(0); this.updateToolVisual();
+    this.facing.set(0, 0, -1); this.effects.hideAim(); this.input?.resetAll(); this.audio.setStorm(0); this.updateToolVisual();
   }
   private startRun(playOpening = true): void {
     if (this.cinematic?.active) this.cinematic.skip(); if (this.tutorial?.active) this.tutorial.skip();
@@ -303,10 +341,9 @@ class WhiteoutGame {
     const relay = this.relays.items.find((item) => item.id === id); if (!relay || relay.repaired) return false;
     if (this.questIndex < 2) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.relayLocked"), "warm"); return false; }
     if (!this.charge(relay.cost)) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.noCredits"), "warm"); return false; }
-    this.relays.repair(id); this.buildings.setAuxiliaryZones(this.relays.zones());
-    this.buildings.setRelayBoosts(this.relays.repaired("servo") ? 1.3 : 1, this.relays.repaired("foundry") ? 1.3 : 1);
+    this.relays.repair(id);
     this.power = Math.min(100, this.power + 4);
-    if (id === "gale" && this.stormPhase === "storm") this.stormTimer = Math.max(0.1, this.stormTimer * 0.72);
+    if (id === "gale" && this.stormPhase === "storm" && this.buildings.relayPowered("gale")) this.stormTimer = Math.max(0.1, this.stormTimer * 0.72);
     this.audio.sfx("repair");
     this.recordEvent(`${this.t(`relay.${id}.name`)} · ${this.t(`relay.${id}.bonus`)}`, "warm", "event");
     this.effects.scan(relay.x, relay.z, groundHeight(relay.x, relay.z) + 0.2); this.effects.burst(relay.x, 2, relay.z, COLORS.cyan, 28);
@@ -384,7 +421,8 @@ class WhiteoutGame {
       if (this.raw > 0) { const n = this.raw; this.raw = 0; this.sell("raw", n, false); }
       if (this.purified > 0) { const n = this.purified; this.purified = 0; this.sell("purified", n, false); }
       if (this.ice > 0) { const n = this.ice; this.ice = 0; this.sell("ice", n, false); }
-      const earned = this.credits - before; this.heat = 100; this.ui.notify(this.t("toast.sold"), "warm"); this.ui.reward(`${this.t("reward.sale")} · +${earned} ◈`);
+      const earned = this.credits - before;
+      if (earned > 0) this.audio.sfx("sell"); this.heat = 100; this.ui.notify(this.t("toast.sold"), "warm"); this.ui.reward(`${this.t("reward.sale")} · +${earned} ◈`);
       this.effects.burst(this.world.depotPos.x, 2.2, this.world.depotPos.z, COLORS.warm, 38); this.updateUI(); return;
     }
     if (Math.hypot(p.x - this.world.fabricatorPos.x, p.z - this.world.fabricatorPos.z) < 3.2) { this.openUpgrades(); return; }
@@ -408,7 +446,7 @@ class WhiteoutGame {
 
   private sell(kind: CargoKind, amount: number, byRail: boolean): number {
     if (!(amount > 0) || !Number.isFinite(amount)) return 0;
-    const rate = kind === "ice" ? 55 : kind === "purified" ? 6 : 1.5;
+    const rate = kind === "ice" ? 42 : kind === "purified" ? 6 : 1.5;
     const exact = amount * rate + this.saleRemainder;
     const earned = Math.max(0, Math.floor(exact + 1e-9));
     this.saleRemainder = Math.max(0, exact - earned);
@@ -417,7 +455,6 @@ class WhiteoutGame {
     if (earned > 0) {
       this.salesHistory.push({ time: this.runTime, amount: earned });
       if (this.salesHistory.length > 500) this.salesHistory.splice(0, this.salesHistory.length - 500);
-      this.audio.sfx("sell");
       if (byRail) this.effects.burst(this.world.depotPos.x, 1.8, this.world.depotPos.z, COLORS.warm, 18);
     }
     if (kind === "raw") this.rawSold += amount;
@@ -431,13 +468,13 @@ class WhiteoutGame {
       case 0: return this.rawSold; case 1: return this.buildings.count("purifier"); case 2: return this.produced;
       case 3: return this.purifiedSold; case 4: return this.buildings.count("press"); case 5: return this.iceSold;
       case 6: return this.railDelivered; case 7: return this.buildings.robotCount();
-      case 8: return this.buildings.count("heater");
-      case 9: return Math.min((this.cleanupCertified ? 1 : this.snow.cleanupPercent / 98), this.recovered / 3, Math.min(100, this.power) / 100) * 100;
+      case 8: return this.buildings.items.filter((building) => building.type === "heater" && building.powered).length;
+      case 9: return Math.min((this.cleanupCertified ? 1 : this.snow.cleanupPercent / GAME.clearanceGoal), this.recovered / 3, Math.min(100, this.power) / 100) * 100;
       default: return 0;
     }
   }
   private updateQuest(): void {
-    if (this.snow.cleanupPercent >= 98) this.cleanupCertified = true;
+    if (this.snow.cleanupPercent >= GAME.clearanceGoal) this.cleanupCertified = true;
     let guard = 0;
     while (this.questIndex < 9 && this.questProgress() + 0.01 >= QUESTS[this.questIndex].target && guard++ < 10) {
       const completed = this.questIndex;
@@ -447,10 +484,10 @@ class WhiteoutGame {
       this.audio.sfx("upgrade"); const p = this.player.group.position; this.effects.burst(p.x, p.y + 1.5, p.z, COLORS.warm, 34); this.questIndex++;
     }
     if (this.questIndex === 9 && this.recovered >= 3 && this.power >= 99.99 && this.cleanupCertified && this.state.is("playing")) {
-      this.saveGame(); this.state.transition("victory"); this.audio.sfx("win"); this.effects.targetRing.visible = false;
+      this.saveGame(); this.state.transition("victory"); this.audio.sfx("win"); this.effects.hideAim();
     }
   }
-  private gameOver(): void { if (!this.state.is("playing")) return; this.heat = 0; this.input.resetAll(); this.state.transition("gameover"); this.saveGame(); this.audio.sfx("lose"); this.effects.targetRing.visible = false; this.updateUI(); }
+  private gameOver(): void { if (!this.state.is("playing")) return; this.heat = 0; this.input.resetAll(); this.state.transition("gameover"); this.saveGame(); this.audio.sfx("lose"); this.effects.hideAim(); this.updateUI(); }
   private recoverCheckpoint(): void {
     if (!this.state.is("gameover")) return;
     this.heat = 100; this.input.resetAll(); this.cancelBuild();
@@ -463,19 +500,294 @@ class WhiteoutGame {
     if (!this.state.is("playing")) return;
     if (this.questIndex < BUILDINGS[type].unlockQuest) { this.ui.notify(this.t("toast.locked"), "warm"); return; }
     if (this.buildMode !== type) { for (const child of [...this.ghost.children]) disposeObject(child, true); this.ghost.clear(); this.ghost.add(this.buildings.createGhost(type)); }
-    this.buildMode = type; this.railSource = null; this.relocating = null; this.input.mode = "build"; this.input.cameraRotate = false; this.ghost.visible = true; this.railPreview.visible = false; this.audio.sfx("ui"); this.updateUI();
+    this.buildMode = type; this.railSource = null; this.clearRailDraft(); this.relocating = null; this.input.mode = "build"; this.input.cameraRotate = false; this.ghost.visible = true; this.railPreview.visible = false; this.audio.sfx("ui"); this.updateUI();
   }
   private selectRail(): void {
     if (!this.state.is("playing")) return; if (this.questIndex < 6) { this.ui.notify(this.t("toast.locked"), "warm"); return; }
     if (this.buildMode === "rail") { this.cancelBuild(); this.audio.sfx("ui"); this.updateUI(); return; }
-    this.buildMode = "rail"; this.railSource = null; this.relocating = null; this.input.mode = "build"; this.input.cameraRotate = true; this.ghost.visible = false; this.railPreview.visible = false; this.audio.sfx("ui"); this.updateUI();
+    this.buildMode = "rail"; this.railSource = null; this.clearRailDraft(); this.drawArmed = true; this.relocating = null; this.input.mode = "build"; this.input.cameraRotate = true; this.ghost.visible = false; this.railPreview.visible = false; this.audio.sfx("ui"); this.updateUI();
   }
   private cancelBuild(): void {
     const restoreCamera = this.buildMode === "rail";
-    this.buildMode = null; this.railSource = null; this.relocating = null;
+    this.buildMode = null; this.railSource = null; this.junctionArm = null; this.sharedArm = false; this.selectedJunction = null; this.clearRailDraft(); this.relocating = null;
     if (restoreCamera) { this.cameraAzimuth = Math.atan2(14, 18); this.cameraZoom = 1; }
     if (this.input) { this.input.mode = "play"; this.input.cameraRotate = false; }
     if (this.ghost) this.ghost.visible = false; if (this.railPreview) this.railPreview.visible = false;
+  }
+  private clearRailDraft(): void {
+    this.railDraft = null; this.networkDraft = null; this.strokePlan = null; this.strokeRaw = null; this.stroke = null; this.anchor = null; this.editMode = false; this.railDrag = null; this.rails.network.setFocus(0);
+    if (this.railHandles) { this.railHandles.visible = false; for (const handle of this.railHandles.children) handle.visible = false; }
+  }
+  private cancelRailDraft(): void {
+    if (!this.railDraft && !this.networkDraft && !this.strokePlan) { this.cancelBuild(); return; }
+    this.railSource = null; this.clearRailDraft(); this.railPreview.visible = false; this.audio.sfx("ui"); this.updateUI();
+  }
+  private endpointLabel(id: number): string {
+    if (id < 0) return this.t("rail.junction");
+    if (id === 0) return this.t("rail.depot");
+    const building = this.buildings.byId(id);
+    return building ? this.t(`building.${building.type}.name`) : this.t("rail.junction");
+  }
+  private railSelectionView(): GameSnapshot["railSelection"] {
+    if (this.selectedEdgeId == null || this.buildMode !== "rail" || this.strokePlan) return null;
+    const edge = this.rails.network.describeEdge(this.selectedEdgeId);
+    if (!edge) return null;
+    return { edgeId: edge.id, source: this.endpointLabel(edge.from), destination: this.endpointLabel(edge.to), kind: edge.kind, busy: edge.busy };
+  }
+  private beginRailEdit(): void {
+    const edge = this.selectedEdgeId == null ? null : this.rails.network.describeEdge(this.selectedEdgeId);
+    if (!edge) return;
+    if (edge.busy) { this.ui.notify(this.t("rail.busy"), "warm"); return; }
+    this.editMode = true; this.drawArmed = true; this.anchor = null; this.audio.sfx("ui"); this.updateUI();
+  }
+  private beginRailExtend(): void {
+    const edge = this.selectedEdgeId == null ? null : this.rails.network.describeEdge(this.selectedEdgeId);
+    if (!edge || edge.points.length < 2) return;
+    const end = edge.points[edge.points.length - 1];
+    this.anchor = { x: end.x, z: end.z }; this.editMode = false; this.drawArmed = true; this.audio.sfx("ui"); this.ui.notify(this.t("rail.drawHint")); this.updateUI();
+  }
+  private deleteSelectedRail(): void {
+    if (this.selectedEdgeId == null) return;
+    const result = this.rails.network.removeEdge(this.selectedEdgeId);
+    if (!result.ok) { this.ui.notify(this.t(result.reason === "occupied" ? "rail.busy" : "toast.railInvalid"), "warm"); this.audio.sfx("empty"); return; }
+    this.selectedEdgeId = null; this.audio.sfx("ui"); this.ui.notify(this.t("rail.branchKept"), "warm"); this.saveGame(); this.updateUI();
+  }
+  private openStroke(raw: RailPathPoint[]): void {
+    if (this.editMode && this.selectedEdgeId != null) {
+      const edge = this.rails.network.describeEdge(this.selectedEdgeId);
+      if (!edge) return;
+      this.strokePlan = { ok: !edge.busy, reason: edge.busy ? "occupied" : "edited", cost: 0, total: 0, points: raw, kind: edge.kind, junctions: [], sourceId: edge.from, destinationId: edge.to };
+      this.strokeRaw = raw.map((point) => ({ ...point })); this.anchor = null; this.stroke = null;
+      this.drawRailPath(raw, !edge.busy); this.updateUI(); return;
+    }
+    const plan = this.rails.network.previewStroke(raw);
+    this.strokePlan = plan; this.strokeRaw = raw.map((point) => ({ ...point })); this.anchor = null; this.stroke = null;
+    if (plan.points.length >= 2) this.drawRailPath(plan.points, plan.ok);
+    const junction = plan.junctions.includes("cross") ? "rail.cross" : plan.junctions.length ? "rail.junctionNew" : plan.ok ? "rail.netReady" : plan.reason === "open" ? "rail.drawOpen" : plan.reason === "cargo" ? "rail.netCargo" : plan.reason === "blocked" ? "toast.railBlocked" : plan.reason === "occupied" ? "rail.busy" : "toast.railInvalid";
+    this.ui.notify(this.t(junction), plan.ok ? "info" : "warm");
+    if (!plan.ok && plan.reason === "open") { this.strokePlan = null; this.strokeRaw = null; this.anchor = raw[raw.length - 1] ?? null; }
+    this.audio.sfx(plan.ok ? "ui" : "empty"); this.updateUI();
+  }
+  private confirmStroke(): { ok: boolean; reason: string; extra: number; total: number } {
+    const raw = this.strokeRaw; const edgeId = this.editMode ? this.selectedEdgeId : null;
+    if (!raw) return { ok: false, reason: "none", extra: 0, total: 0 };
+    const result = edgeId != null
+      ? this.rails.network.reshape(edgeId, raw, (cost) => this.charge(cost))
+      : this.rails.network.commitStroke(raw, (cost) => this.charge(cost));
+    this.clearRailDraft(); this.railPreview.visible = false;
+    if (!result.ok) { this.audio.sfx("empty"); this.ui.notify(this.t(result.reason === "occupied" ? "rail.busy" : result.reason === "credits" ? "toast.noCredits" : result.reason === "cargo" ? "rail.netCargo" : result.reason === "blocked" ? "toast.railBlocked" : "toast.railInvalid"), "warm"); this.updateUI(); return { ok: false, reason: result.reason, extra: result.cost, total: result.total }; }
+    this.audio.sfx("rail"); this.ui.notify(this.t("rail.netDone"), "warm"); this.saveGame(); this.updateUI();
+    return { ok: true, reason: result.reason, extra: result.cost, total: result.total };
+  }
+  private tapRail(x: number, y: number): void {
+    if (this.strokePlan || this.networkDraft || this.railDraft || !this.drawArmed) return;
+    const point = this.groundFromPointer(x, y); if (!point) return;
+    if (this.anchor) { this.openStroke([this.anchor, { x: point.x, z: point.z }]); return; }
+    const junction = this.rails.network.hit(point.x, point.z, this.input.isCoarse ? 3.2 : 1.8);
+    if (junction) { this.selectedJunction = junction.id; this.selectedEdgeId = null; this.rails.network.setFocus(junction.id); this.audio.sfx("ui"); this.updateUI(); return; }
+    const edge = this.rails.network.hitEdge(point.x, point.z, this.input.isCoarse ? 2.2 : 1.35);
+    const nearPort = this.buildings.items.some((building) => (building.type === "sweeper" || building.type === "purifier" || building.type === "press") && Math.hypot(point.x - building.x, point.z - building.z) < 3.15) || Math.hypot(point.x - GAME.depot.x, point.z - GAME.depot.z) <= 4.2;
+    if (nearPort) { this.anchor = { x: point.x, z: point.z }; this.ui.notify(this.t("rail.drawHint")); this.updateUI(); return; }
+    if (edge) { this.selectedEdgeId = edge.edgeId; this.selectedJunction = null; this.anchor = { x: point.x, z: point.z }; this.rails.network.setFocus(0); this.ui.notify(this.t("rail.drawHint")); this.audio.sfx("ui"); this.updateUI(); }
+  }
+  private followStroke(): void {
+    const down = this.input.pointerDown && this.buildMode === "rail" && this.drawArmed && !this.strokePlan && !this.networkDraft && !this.railDraft;
+    if (down && !this.strokeWasDown) {
+      const point = this.groundFromPointer(this.input.pointerX, this.input.pointerY);
+      this.stroke = point ? [{ x: point.x, z: point.z }] : null;
+    } else if (down && this.stroke) {
+      const point = this.groundFromPointer(this.input.pointerX, this.input.pointerY);
+      const last = this.stroke[this.stroke.length - 1];
+      if (point && last && Math.hypot(point.x - last.x, point.z - last.z) >= 0.28) {
+        this.stroke.push({ x: point.x, z: point.z });
+        this.drawRailPath(this.stroke, true);
+      }
+    } else if (!this.input.pointerDown && this.strokeWasDown && this.stroke && this.stroke.length > 1) {
+      const end = this.stroke[this.stroke.length - 1];
+      const start = this.stroke[0];
+      if (Math.hypot(end.x - start.x, end.z - start.z) >= 1.15) this.openStroke(this.anchor ? [this.anchor, ...this.stroke] : this.stroke);
+      this.stroke = null;
+    }
+    if (!this.input.pointerDown) this.strokeWasDown = false; else this.strokeWasDown = this.buildMode === "rail";
+  }
+  private railEndpoint(destinationId: number): RailPathPoint | null {
+    if (destinationId === 0) return { x: GAME.depot.x, z: GAME.depot.z - 1.7 };
+    const target = this.buildings.byId(destinationId); return target ? { x: target.x, z: target.z } : null;
+  }
+  private footprints(): Array<{ x: number; z: number; radius: number }> {
+    return this.buildings.items.map((building) => ({ x: building.x, z: building.z, radius: BUILDINGS[building.type].radius }));
+  }
+  private openRailDraft(sourceId: number, destinationId: number, controls: RailPathPoint[], lane: number, paid: number, existing: boolean): void {
+    this.railDraft = { sourceId, destinationId, controls: controls.map((point) => ({ ...point })), lane, paid, existing, selected: null };
+    this.railSource = sourceId; this.railDrag = null; this.syncRailHandles(); this.updateUI();
+  }
+  private hitRailHandle(x: number, z: number): number {
+    const draft = this.railDraft; if (!draft) return -1;
+    const reach = this.input.isCoarse ? 2.6 : 1.55;
+    let best = -1, bestD = reach;
+    for (let i = 1; i < draft.controls.length - 1; i++) {
+      const dist = Math.hypot(x - draft.controls[i].x, z - draft.controls[i].z);
+      if (dist < bestD) { best = i; bestD = dist; }
+    }
+    return best;
+  }
+  private syncRailHandles(): void {
+    const draft = this.railDraft; this.railHandles.visible = !!draft;
+    this.railHandles.children.forEach((handle, index) => {
+      const point = draft?.controls[index];
+      handle.visible = !!point;
+      if (!point) return;
+      handle.position.set(point.x, groundHeight(point.x, point.z) + 1.25, point.z);
+      const endpoint = index === 0 || index === draft!.controls.length - 1;
+      handle.scale.setScalar(endpoint ? 0.55 : draft!.selected === index ? 1.25 : 0.95);
+      ((handle as THREE.Mesh).material as THREE.MeshBasicMaterial).color.setHex(endpoint ? 0x79f0df : draft!.selected === index ? 0xfff0b0 : 0xffc56a);
+    });
+  }
+  private drawRailPath(points: RailPathPoint[], valid: boolean): void {
+    const attr = this.railPreview.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const count = Math.min(96, points.length);
+    for (let i = 0; i < count; i++) { const point = points[Math.min(i, points.length - 1)]; attr.setXYZ(i, point.x, groundHeight(point.x, point.z) + 1.45, point.z); }
+    attr.needsUpdate = true; this.railPreview.geometry.setDrawRange(0, count); this.railPreview.geometry.computeBoundingSphere(); this.railPreview.computeLineDistances();
+    const material = this.railPreview.material as THREE.LineDashedMaterial;
+    material.color.setHex(valid ? COLORS.cyan : 0xff4b3e); material.dashSize = valid ? 0.85 : 0.34; material.gapSize = valid ? 0.22 : 0.28; material.opacity = valid ? 0.85 : 1;
+    this.railPreview.visible = count >= 2;
+  }
+  private draftQuote() {
+    const draft = this.railDraft; if (!draft) return null;
+    const source = this.buildings.byId(draft.sourceId); const dest = this.railEndpoint(draft.destinationId);
+    if (!source || !dest) return null;
+    const quote = this.rails.quote(draft.controls, draft.lane, true);
+    const blocked = RailSystem.blocked(quote.points, this.footprints(), { x: source.x, z: source.z }, dest);
+    const extra = draft.existing ? Math.max(0, quote.cost - draft.paid) : quote.cost;
+    return { quote, blocked, extra, source, dest, valid: !blocked && quote.total >= 2 && extra <= this.credits };
+  }
+  private endName(end: NetEnd): string {
+    if ("nodeId" in end) { const node = this.rails.network.inspect(end.nodeId); return node ? this.t(node.kind === "merge" ? "rail.merge" : "rail.split") : this.t("rail.junction"); }
+    if (end.buildingId === 0) return this.t("rail.depot");
+    const building = this.buildings.byId(end.buildingId); return building ? this.t(`building.${building.type}.name`) : this.t("rail.junction");
+  }
+  private noteNet(result: NetResult): void {
+    const key = result.ok ? (result.reason === "reuse" ? "rail.netReuse" : "rail.netDone") : result.reason === "blocked" ? "toast.railBlocked" : result.reason === "credits" ? "toast.noCredits" : result.reason === "cycle" ? "rail.netCycle" : result.reason === "cargo" ? "rail.netCargo" : result.reason === "occupied" ? "rail.netOccupied" : result.reason === "open" ? "rail.netOpen" : result.reason === "degree" ? "rail.netDegree" : "toast.railInvalid";
+    this.ui.notify(this.t(key), "warm"); if (result.ok) this.audio.sfx("rail"); else this.audio.sfx("empty");
+  }
+  private proposeNet(from: NetEnd, to: NetEnd): void {
+    const preview = this.rails.network.preview(from, to);
+    if (!preview.kind || (preview.reason !== "blocked" && !preview.ok)) { this.noteNet({ ok: false, reason: preview.reason, cost: 0, edgeId: 0, total: 0 }); return; }
+    this.clearRailDraft();
+    this.networkDraft = { from, to, points: preview.points, valid: preview.valid, cost: preview.cost, kind: preview.kind, sourceName: this.endName(from), destinationName: this.endName(to) };
+    this.sharedArm = false; this.audio.sfx("ui"); this.updateUI();
+  }
+  /** A junction feeds a destination and is fed by sources: pick the direction the graph can actually accept. */
+  private proposeJunctionLink(nodeId: number, buildingId: number): void {
+    const view = this.rails.network.inspect(nodeId);
+    const feed: [NetEnd, NetEnd] = [{ buildingId, port: "out" }, { nodeId }];
+    const drain: [NetEnd, NetEnd] = [{ nodeId }, { buildingId, port: "in" }];
+    const [first, second] = view?.kind === "split" ? [drain, feed] : [feed, drain];
+    const probe = this.rails.network.preview(first[0], first[1]);
+    if (probe.ok || probe.reason === "blocked") { this.proposeNet(first[0], first[1]); return; }
+    this.proposeNet(second[0], second[1]);
+  }
+  private confirmNetwork(): { ok: boolean; reason: string; extra: number; total: number } {
+    const draft = this.networkDraft; if (!draft) return { ok: false, reason: "none", extra: 0, total: 0 };
+    if (!draft.valid) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railBlocked"), "warm"); return { ok: false, reason: "blocked", extra: 0, total: 0 }; }
+    const result = this.rails.network.link(draft.from, draft.to, (cost) => this.charge(cost));
+    this.networkDraft = null; this.railPreview.visible = false; this.noteNet(result);
+    if (result.ok) { this.railSource = null; this.saveGame(); }
+    this.updateUI();
+    return { ok: result.ok, reason: result.reason, extra: result.cost, total: result.total };
+  }
+  private confirmRailDraft(): { ok: boolean; reason: string; extra: number; total: number } {
+    if (this.strokePlan && this.strokeRaw) return this.confirmStroke();
+    if (this.networkDraft) return this.confirmNetwork();
+    const draft = this.railDraft;
+    if (!draft) return { ok: false, reason: "none", extra: 0, total: 0 };
+    const view = this.draftQuote();
+    if (!view) { this.clearRailDraft(); return { ok: false, reason: "missing", extra: 0, total: 0 }; }
+    if (view.blocked) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railBlocked"), "warm"); return { ok: false, reason: "blocked", extra: 0, total: view.quote.total }; }
+    if (view.extra > this.credits) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.noCredits"), "warm"); return { ok: false, reason: "credits", extra: view.extra, total: view.quote.total }; }
+    const existing = this.rails.find(draft.sourceId, draft.destinationId);
+    if (existing) {
+      const same = existing.routed && existing.path.length === draft.controls.length && existing.path.every((point, index) => Math.hypot(point.x - draft.controls[index].x, point.z - draft.controls[index].z) < 0.05);
+      if (same) { this.clearRailDraft(); this.railPreview.visible = false; this.updateUI(); return { ok: true, reason: "same", extra: 0, total: existing.total }; }
+      const ok = this.rails.retarget(existing, draft.controls, (cost) => this.charge(cost));
+      if (!ok) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.noCredits"), "warm"); return { ok: false, reason: "credits", extra: view.extra, total: view.quote.total }; }
+      this.audio.sfx("rail"); this.ui.notify(this.t("toast.railEdited"), "warm");
+      this.clearRailDraft(); this.railPreview.visible = false; this.saveGame(); this.updateUI();
+      return { ok: true, reason: "edited", extra: view.extra, total: existing.total };
+    }
+    const created = this.rails.create(draft.sourceId, draft.destinationId, draft.controls, (cost) => this.charge(cost), false, { lane: draft.lane, routed: true });
+    if (!created) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railInvalid"), "warm"); return { ok: false, reason: "invalid", extra: 0, total: view.quote.total }; }
+    this.audio.sfx("rail"); this.ui.notify(this.t("toast.railDone"), "warm"); this.shakeStrength = 0.12;
+    this.clearRailDraft(); this.railSource = null; this.railPreview.visible = false; this.updateQuest(); this.saveGame(); this.updateUI();
+    return { ok: true, reason: "created", extra: created.paid, total: created.total };
+  }
+  private removeRailPoint(index = this.railDraft?.selected ?? -1): boolean {
+    const draft = this.railDraft; if (!draft || index <= 0 || index >= draft.controls.length - 1) return false;
+    draft.controls.splice(index, 1); draft.selected = null; this.syncRailHandles(); this.updateUI(); return true;
+  }
+  private placeRail(x: number, z: number): void {
+    const handle = this.hitRailHandle(x, z);
+    if (handle > 0) { this.railDrag = { index: handle, moved: false, wasSelected: this.railDraft!.selected === handle }; this.railDraft!.selected = handle; this.syncRailHandles(); this.updateUI(); return; }
+    if (this.junctionArm && !this.railDraft) {
+      const id = this.rails.network.place(this.junctionArm, x, z);
+      this.selectedJunction = id; this.junctionArm = null; this.audio.sfx("rail"); this.saveGame(); this.updateUI(); return;
+    }
+    const junction = this.rails.network.hit(x, z, this.input.isCoarse ? 3.6 : 2.7);
+    if (!this.railDraft && junction && this.railSource !== null) { this.proposeNet({ buildingId: this.railSource, port: "out" }, { nodeId: junction.id }); this.railSource = null; return; }
+    if (!this.railDraft && junction && this.selectedJunction != null && junction.id !== this.selectedJunction) { this.proposeNet({ nodeId: this.selectedJunction }, { nodeId: junction.id }); return; }
+    if (!this.railDraft && junction) { this.selectedJunction = junction.id; this.audio.sfx("ui"); this.updateUI(); return; }
+    const nearDepot = Math.hypot(x - GAME.depot.x, z - GAME.depot.z) <= 4.2;
+    if (!this.railDraft && this.selectedJunction != null && nearDepot) { this.proposeNet({ nodeId: this.selectedJunction }, { buildingId: 0, port: "in" }); return; }
+    const nearSource = this.buildings.items.find((building) => (building.type === "sweeper" || building.type === "purifier" || building.type === "press") && Math.hypot(x - building.x, z - building.z) < 2.4);
+    const route = this.rails.hit(x, z, this.input.isCoarse ? 2.2 : 1.35);
+    if (!this.railDraft && route && !nearSource) {
+      const end = this.railEndpoint(route.destinationId); if (!end) return;
+      this.openRailDraft(route.sourceId, route.destinationId, route.path.map((point) => ({ ...point })), route.lane, route.paid, true);
+      this.audio.sfx("ui"); this.updateUI(); return;
+    }
+    if (!this.railDraft && this.selectedJunction != null && nearSource) { this.proposeJunctionLink(this.selectedJunction, nearSource.id); return; }
+    if (!this.railDraft && this.railSource === null) {
+      const source = nearSource ?? this.buildings.items.find((building) => (building.type === "sweeper" || building.type === "purifier" || building.type === "press") && Math.hypot(x - building.x, z - building.z) < 3.2);
+      if (!source) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railInvalid"), "warm"); return; }
+      this.railSource = source.id; this.audio.sfx("ui"); this.ui.notify(this.t("toast.railSource")); this.updateUI(); return;
+    }
+    if (!this.railDraft) {
+      const sourceId = this.railSource; const source = sourceId === null ? undefined : this.buildings.byId(sourceId); if (!source) { this.cancelBuild(); return; }
+      const target = this.resolveRailTarget(x, z, source.id);
+      if (!target?.valid) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railInvalid"), "warm"); return; }
+      const existing = this.rails.find(source.id, target.id);
+      if (existing) { this.openRailDraft(existing.sourceId, existing.destinationId, existing.path.map((point) => ({ ...point })), existing.lane, existing.paid, true); this.audio.sfx("ui"); return; }
+      this.proposeNet({ buildingId: source.id, port: "out" }, { buildingId: target.id, port: "in" });
+      this.railSource = null; return;
+    }
+    const draft = this.railDraft;
+    const first = draft.controls[0], last = draft.controls[draft.controls.length - 1];
+    if (Math.hypot(x - first.x, z - first.z) < 2.4 || Math.hypot(x - last.x, z - last.z) < 2.4) return;
+    if (draft.controls.length >= 10) { this.audio.sfx("empty"); return; }
+    let segment = 1, nearest = Infinity;
+    for (let i = 1; i < draft.controls.length; i++) {
+      const a = draft.controls[i - 1], b = draft.controls[i];
+      const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz;
+      const t = len2 < 1e-6 ? 0 : THREE.MathUtils.clamp(((x - a.x) * dx + (z - a.z) * dz) / len2, 0, 1);
+      const dist = Math.hypot(x - (a.x + dx * t), z - (a.z + dz * t));
+      if (dist < nearest) { nearest = dist; segment = i; }
+    }
+    if (nearest > (this.input.isCoarse ? 6 : 4.5)) return;
+    if (this.footprints().some((foot) => Math.hypot(x - foot.x, z - foot.z) < foot.radius + 0.4)) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railBlocked"), "warm"); return; }
+    draft.controls.splice(segment, 0, { x, z }); draft.selected = segment; this.syncRailHandles(); this.audio.sfx("ui"); this.updateUI();
+  }
+  private followRailDrag(): void {
+    const drag = this.railDrag; const draft = this.railDraft;
+    if (!drag || !draft) return;
+    if (this.input.pointerDown) {
+      const point = this.groundFromPointer(this.input.pointerX, this.input.pointerY); if (!point) return;
+      const current = draft.controls[drag.index]; if (!current) return;
+      if (Math.hypot(point.x - current.x, point.z - current.z) > 0.35) drag.moved = true;
+      current.x = THREE.MathUtils.clamp(point.x, -64, 64); current.z = THREE.MathUtils.clamp(point.z, -64, 64);
+      this.syncRailHandles(); return;
+    }
+    if (!drag.moved && drag.wasSelected) this.removeRailPoint(drag.index);
+    this.railDrag = null; this.updateUI();
   }
   private groundFromPointer(x: number, y: number): THREE.Vector3 | null {
     this.pointer.set(x, y); this.raycaster.setFromCamera(this.pointer, this.camera);
@@ -489,29 +801,18 @@ class WhiteoutGame {
       .sort((a, b) => Math.hypot(x - a.x, z - a.z) - Math.hypot(x - b.x, z - b.z) || a.id - b.id);
     const target = candidates[0];
     const atDepot = Math.hypot(x - GAME.depot.x, z - GAME.depot.z) <= 4.2 && (!target || Math.hypot(x - GAME.depot.x, z - GAME.depot.z) <= Math.hypot(x - target.x, z - target.z));
-    if (atDepot) return { id: 0, x: GAME.depot.x, z: GAME.depot.z - 3.2, valid: kind !== "raw" };
+    if (atDepot) return { id: 0, x: GAME.depot.x, z: GAME.depot.z - 1.7, valid: kind !== "raw" };
     if (!target) return null;
     const valid = (kind === "raw" && target.type === "purifier") || (kind === "purified" && target.type === "press");
     return { id: target.id, x: target.x, z: target.z, valid };
   }
   private placeAt(x: number, z: number): void {
     if (!this.buildMode) return;
-    if (this.buildMode === "rail") {
-      if (this.railSource === null) {
-        const source = this.buildings.items.find((b) => (b.type === "sweeper" || b.type === "purifier" || b.type === "press") && Math.hypot(x - b.x, z - b.z) < 3.2);
-        if (!source) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railInvalid"), "warm"); return; }
-        this.railSource = source.id; this.audio.sfx("ui"); this.ui.notify(this.t("toast.railSource")); this.updateUI(); return;
-      }
-      const source = this.buildings.byId(this.railSource); if (!source) { this.cancelBuild(); return; }
-      const target = this.resolveRailTarget(x, z, source.id);
-      if (!target?.valid) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.railInvalid"), "warm"); return; }
-      const rail = this.rails.create(source.id, target.id, RailSystem.pathFor(source.x, source.z, target.x, target.z), (cost) => this.charge(cost));
-      if (!rail) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.noCredits"), "warm"); return; }
-      this.audio.sfx("rail"); this.ui.notify(this.t("toast.railDone"), "warm"); this.shakeStrength = 0.12; this.cancelBuild(); this.updateQuest(); this.updateUI(); return;
-    }
+    if (this.buildMode === "rail") { this.placeRail(x, z); return; }
     const type = this.buildMode; const def = BUILDINGS[type]; const bx = Math.round(x), bz = Math.round(z);
     if (this.relocating !== null) {
       if (!this.buildings.validPlacement(bx, bz, def.radius, this.relocating, this.player.group.position)) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.invalidBuild"), "warm"); return; }
+      if (!this.confirmPowerPlacement(type, bx, bz, this.relocating)) return;
       const id = this.relocating;
       if (!this.buildings.relocate(id, bx, bz)) return;
       this.rails.removeBuilding(id);
@@ -520,12 +821,64 @@ class WhiteoutGame {
       this.cancelBuild(); this.saveGame(); this.updateUI(); return;
     }
     if (!this.buildings.validPlacement(bx, bz, def.radius, undefined, this.player.group.position)) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.invalidBuild"), "warm"); return; }
-    if (type === "generator" && Math.abs(bx - GAME.baseCenter.x) + Math.abs(bz - GAME.baseCenter.z) > GAME.generatorCableRange) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.cableRange"), "warm"); return; }
+    if (type === "generator" && !this.buildings.generatorReaches(bx, bz, this.relocating ?? undefined)) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.cableRange"), "warm"); return; }
+    if (!this.confirmPowerPlacement(type, bx, bz)) return;
     const b = this.buildings.build(type, bx, bz, (cost) => this.charge(cost));
     if (!b) { this.audio.sfx("empty"); this.ui.notify(this.t("toast.noCredits"), "warm"); return; }
     this.clearBuildingPad(bx, bz, def.radius);
     this.effects.scan(bx, bz, groundHeight(bx, bz) + 0.15); this.effects.burst(bx, groundHeight(bx, bz) + 1, bz, COLORS.cyan, 24); this.audio.sfx("build"); this.ui.notify(`${this.t(`building.${type}.name`)} · ${this.t("toast.built")}`, "warm");
     this.shakeStrength = 0.14; this.cancelBuild(); this.updateQuest(); this.saveGame(); this.updateUI();
+  }
+  private cleanupGuide(): { x: number; z: number } | null {
+    const p = this.player.group.position;
+    const hidden = this.world.cores.filter((core) => !core.recovered);
+    const ranked = this.snow.chunkViews()
+      .filter((chunk) => chunk.remaining >= 0.55)
+      .map((chunk) => ({ ...chunk, secret: hidden.some((core) => Math.hypot(core.x - chunk.x, core.z - chunk.z) < 9) }))
+      .sort((a, b) => (a.secret === b.secret ? 0 : a.secret ? 1 : -1) || (a.progress < 0.45 ? 0 : 1) - (b.progress < 0.45 ? 0 : 1) || Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z));
+    const open = ranked.filter((chunk) => !chunk.secret);
+    const pool = open.length ? open : ranked;
+    for (const chunk of pool.slice(0, 6)) if (this.buildings.routeExists(p, chunk)) return chunk;
+    return pool[0] ?? null;
+  }
+  private beginWorkArea(): void {
+    if (!this.state.is("playing")) return;
+    const dock = this.buildings.nearest(this.player.group.position.x, this.player.group.position.z);
+    if (!dock || dock.type !== "sweeper" || dock.damaged) { this.audio.sfx("empty"); this.ui.notify(this.t("robot.areaNeedDock"), "warm"); return; }
+    this.cancelBuild();
+    this.workDock = dock.id; this.workPoint = dock.workArea ? { x: dock.workArea.x, z: dock.workArea.z } : null; this.workLocked = !!dock.workArea;
+    this.input.mode = "build"; this.input.cameraRotate = false; this.audio.sfx("ui"); this.updateUI();
+  }
+  private confirmWorkArea(): void {
+    if (this.workDock == null || !this.workPoint) { this.audio.sfx("empty"); this.ui.notify(this.t("robot.areaHint"), "warm"); return; }
+    const result = this.buildings.assignWorkArea(this.workDock, this.workPoint.x, this.workPoint.z);
+    this.finishWorkAim();
+    if (result.ok) { this.audio.sfx("upgrade"); this.ui.notify(this.t("robot.areaLive"), "info"); this.saveGame(); }
+    this.updateUI();
+  }
+  private cancelWorkArea(): void { this.finishWorkAim(); this.audio.sfx("ui"); this.updateUI(); }
+  private finishWorkAim(): void {
+    this.workDock = null; this.workPoint = null; this.workLocked = false;
+    if (this.workRing) this.workRing.visible = false;
+    if (this.input && this.buildMode == null) { this.input.mode = "play"; this.input.cameraRotate = false; }
+  }
+  private clearNearestWorkArea(): void {
+    const dock = this.buildings.nearest(this.player.group.position.x, this.player.group.position.z);
+    if (!dock || dock.type !== "sweeper") { this.audio.sfx("empty"); return; }
+    this.buildings.clearWorkArea(dock.id); this.finishWorkAim(); this.audio.sfx("ui"); this.saveGame(); this.updateUI();
+  }
+  private followWorkAim(): void {
+    if (this.workDock == null || !this.workRing) return;
+    const dock = this.buildings.byId(this.workDock);
+    if (!dock || dock.type !== "sweeper") { this.finishWorkAim(); return; }
+    if (!this.workLocked && this.input.pointerActive) {
+      const point = this.groundFromPointer(this.input.pointerX, this.input.pointerY);
+      if (point) this.workPoint = { x: point.x, z: point.z };
+    }
+    const point = this.workPoint ?? { x: dock.x, z: dock.z + 8 };
+    this.workRing.visible = true;
+    this.workRing.position.set(point.x, groundHeight(point.x, point.z) + 0.22, point.z);
+    this.workRing.scale.set(workAreaRadius(dock.level), workAreaRadius(dock.level), 1);
   }
   private upgradeNearest(): void {
     if (!this.state.is("playing")) return; const p = this.player.group.position; const b = this.buildings.nearest(p.x, p.z); if (!b) { this.audio.sfx("empty"); return; }
@@ -603,7 +956,10 @@ class WhiteoutGame {
   }
 
   private updateStorm(dt: number): void {
-    if (this.stormPhase === "calm" && this.runTime >= this.nextStormAt - GAME.stormWarning) { this.stormPhase = "warning"; this.audio.sfx("warning"); this.ui.notify(this.t("storm.warning"), "danger"); }
+    if (this.stormPhase === "calm" && this.runTime >= this.nextStormAt - GAME.stormWarning) {
+      this.stormPhase = "warning"; this.audio.sfx("warning");
+      this.ui.notify(this.t(this.buildings.exposedSweeperCount() > 0 ? "storm.warningChoice" : "storm.warning"), "danger");
+    }
     if (this.stormPhase === "warning") {
       this.stormTimer = Math.max(0, this.nextStormAt - this.runTime);
       if (this.runTime >= this.nextStormAt) {
@@ -612,7 +968,7 @@ class WhiteoutGame {
         this.severeStorm = this.forceNextSevere || (inSevereWindow && this.random() < 0.72);
         this.forceNextSevere = false;
         if (inSevereWindow) this.nextSevereStorm = this.stormCount + 5 + Math.floor(this.random() * 3);
-        this.stormPhase = "storm"; this.stormTimer = (this.severeStorm ? GAME.severeStormDuration : GAME.stormDuration) * (this.relays.repaired("gale") ? 0.72 : 1); this.audio.sfx("warning");
+        this.stormPhase = "storm"; this.stormTimer = (this.severeStorm ? GAME.severeStormDuration : GAME.stormDuration) * (this.buildings.relayPowered("gale") ? 0.72 : 1); this.audio.sfx("warning");
         const filled = this.snow.stormBurst(this.buildings.heaterZones());
         const candidates = this.buildings.items.filter((b) => !b.damaged).map((b) => b.id);
         const severeDamage = this.severeStorm ? 1 + (this.random() < 0.7 ? 1 : 0) + (this.random() < 0.25 ? 1 : 0) : 0;
@@ -621,8 +977,9 @@ class WhiteoutGame {
         for (let i = 0; i < damageCount; i++) {
           const index = Math.floor(this.random() * candidates.length); const id = candidates.splice(index, 1)[0]; this.buildings.damage(id);
         }
-        if (this.severeStorm) this.recordEvent(`${this.t("storm.severe")} · ${this.t("storm.damage")} ${damageCount}`, "danger", "damage");
-        else if (damageCount > 0) this.recordEvent(`${this.t("storm.active")} · ${this.t("storm.damage")} ${damageCount}`, "danger", "damage");
+        const damageText = new Intl.NumberFormat(locale(this.settings.language)).format(damageCount);
+        if (this.severeStorm) this.recordEvent(`${this.t("storm.severe")} · ${this.t("storm.damage")} ${damageText}`, "danger", "damage");
+        else if (damageCount > 0) this.recordEvent(`${this.t("storm.active")} · ${this.t("storm.damage")} ${damageText}`, "danger", "damage");
         else if (filled > 0) this.recordEvent(this.t("storm.regrow"), "danger", "event");
       }
     } else if (this.stormPhase === "storm") {
@@ -649,7 +1006,11 @@ class WhiteoutGame {
     }
     const frozen = this.buildings.nearestFrozen(p.x, p.z); if (frozen) { this.prompt = `E · ${this.t("prompt.rescue")}`; return; }
     const relay = this.relays.nearest(p.x, p.z);
-    if (relay) { this.prompt = `E · ${this.t(relay.repaired ? `relay.${relay.id}.name` : "prompt.relayRepair")} · ${relay.repaired ? `${relay.warmth}m ${this.t("relay.warmZone")}` : `${relay.cost} ◈`}`; return; }
+    if (relay) {
+      const live = relay.repaired && this.buildings.relayPowered(relay.id);
+      const detail = !relay.repaired ? `${relay.cost} ◈` : live ? `${relay.warmth}m ${this.t("relay.warmZone")}` : this.t("relay.needsPower");
+      this.prompt = `E · ${this.t(relay.repaired ? `relay.${relay.id}.name` : "prompt.relayRepair")} · ${detail}`; return;
+    }
     if (Math.hypot(p.x - this.world.depotPos.x, p.z - this.world.depotPos.z) < 3.3) { this.prompt = this.t(this.load > 0.001 ? "prompt.depot" : "prompt.empty"); return; }
     if (Math.hypot(p.x - this.world.fabricatorPos.x, p.z - this.world.fabricatorPos.z) < 3.2) { this.prompt = this.t("prompt.fabricator"); return; }
     const b = this.buildings.nearest(p.x, p.z); if (b) this.prompt = b.damaged
@@ -657,22 +1018,112 @@ class WhiteoutGame {
       : `${this.t(`building.${b.type}.name`)} · E ${this.t(b.type === "sweeper" ? "prompt.depositSweeper" : b.type === "purifier" || b.type === "press" ? "prompt.deposit" : "prompt.collect")} · U ${this.t("action.upgrade")}`;
   }
 
+  private confirmPowerPlacement(type: BuildingType, x: number, z: number, ignoreId?: number): boolean {
+    const forecast = this.buildings.forecastPower(type, x, z, ignoreId);
+    if (!forecast.consumesPower || forecast.connected) return true;
+    this.audio.sfx("empty");
+    this.ui.notify(this.t(forecast.reason === "network-full" ? "toast.networkFull" : "toast.noPowerHere"), "warm");
+    return false;
+  }
+  private fundedSnowTarget(): { x: number; z: number } | null {
+    const p = this.player.group.position; const avoided: Array<{ x: number; z: number }> = [];
+    for (const radius of [28, 56, 84]) {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const patch = this.snow.findBestPatch(p.x, p.z, radius, avoided);
+        if (!patch) break;
+        avoided.push(patch);
+        if (patch.density < 0.22) continue;
+        if (this.buildings.routeExists({ x: p.x, z: p.z }, patch)) return patch;
+      }
+    }
+    return null;
+  }
+  private openPowerPad(type: BuildingType): { x: number; z: number } | null {
+    const sources: Array<{ x: number; z: number; r: number }> = [{ x: GAME.baseCenter.x, z: GAME.baseCenter.z, r: GAME.basePowerRadius }];
+    for (const generator of this.buildings.items) if (generator.type === "generator" && generator.powered && !generator.damaged) sources.push({ x: generator.x, z: generator.z, r: 9 + (generator.level - 1) * 4 });
+    for (const source of sources) {
+      if (!this.buildings.forecastPower(type, source.x, source.z).connected) continue;
+      for (let ring = 0; ring <= Math.min(source.r - 1, 10); ring += 2) for (let step = 0; step < 8; step++) {
+        const angle = step / 8 * Math.PI * 2;
+        const x = Math.round(source.x + Math.cos(angle) * ring); const z = Math.round(source.z + Math.sin(angle) * ring);
+        if (Math.hypot(x - source.x, z - source.z) > source.r - 0.4) continue;
+        if (!this.buildings.validPlacement(x, z, BUILDINGS[type].radius)) continue;
+        if (this.buildings.forecastPower(type, x, z).connected) return { x, z };
+      }
+    }
+    return null;
+  }
+  private generatorGuide(): { x: number; z: number } {
+    const forecast = this.buildings.forecastPower("heater", GAME.baseCenter.x, GAME.baseCenter.z);
+    const upgradeable = this.buildings.items.find((building) => building.type === "generator" && building.level < 3);
+    if (forecast.networkFull && upgradeable) return { x: upgradeable.x, z: upgradeable.z };
+    // A generator beside the crowded base takes nearby machines and frees the six
+    // base connections for heaters that are already inside base coverage.
+    let fallback: { x: number; z: number } | null = null;
+    for (let ring = 6; ring <= 18; ring += 2) for (let step = 0; step < 12; step++) {
+      const angle = step / 12 * Math.PI * 2;
+      const x = Math.round(GAME.baseCenter.x + Math.cos(angle) * ring); const z = Math.round(GAME.baseCenter.z + Math.sin(angle) * ring);
+      if (!this.buildings.generatorReaches(x, z)) continue;
+      if (!this.buildings.validPlacement(x, z, BUILDINGS.generator.radius)) continue;
+      const covered = this.buildings.items.filter((building) => building.type !== "generator" && Math.hypot(building.x - x, building.z - z) <= 9).length;
+      if (covered >= 2) return { x, z };
+      if (covered >= 1 && !fallback) fallback = { x, z };
+    }
+    return fallback ?? (upgradeable ? { x: upgradeable.x, z: upgradeable.z } : { x: GAME.baseCenter.x - 8, z: GAME.baseCenter.z });
+  }
+
   private updateGhost(): void {
-    if (!this.buildMode || !this.input.pointerActive) { this.ghost.visible = false; this.railPreview.visible = false; return; }
+    if (this.buildMode === "rail" && (this.railDraft || this.networkDraft)) {
+      this.ghost.visible = false;
+      if (this.railDraft) { const view = this.draftQuote(); if (view) this.drawRailPath(view.quote.points, view.valid); this.syncRailHandles(); }
+      else if (this.networkDraft) this.drawRailPath(this.networkDraft.points, this.networkDraft.valid);
+      return;
+    }
+    if (!this.buildMode || !this.input.pointerActive) { this.ghost.visible = false; this.railPreview.visible = false; this.buildCursor = null; return; }
     const point = this.groundFromPointer(this.input.pointerX, this.input.pointerY); if (!point) return;
     if (this.buildMode === "rail") {
-      this.ghost.visible = false; if (this.railSource === null) { this.railPreview.visible = false; return; }
-      const source = this.buildings.byId(this.railSource); if (!source) return;
-      const target = this.resolveRailTarget(point.x, point.z, source.id);
-      if (!target) { this.railPreview.visible = false; return; }
-      const path = RailSystem.pathFor(source.x, source.z, target.x, target.z);
-      const attr = this.railPreview.geometry.getAttribute("position") as THREE.BufferAttribute;
-      for (let i = 0; i < 4; i++) { const p = path[Math.min(i, path.length - 1)]; attr.setXYZ(i, p.x, groundHeight(p.x, p.z) + 1.05, p.z); }
-      attr.needsUpdate = true; this.railPreview.geometry.setDrawRange(0, path.length); this.railPreview.visible = true; (this.railPreview.material as THREE.LineBasicMaterial).color.setHex(target.valid ? COLORS.cyan : COLORS.orange); return;
+      this.ghost.visible = false;
+      const reach = this.input.isCoarse ? 3.6 : 2.7;
+      const junction = this.rails.network.hit(point.x, point.z, reach);
+      const netGhost = (from: NetEnd, to: NetEnd, fallback: [RailPathPoint, RailPathPoint]) => {
+        const preview = this.rails.network.preview(from, to);
+        if (preview.points.length >= 2) { this.drawRailPath(preview.points, preview.valid); return; }
+        this.drawRailPath(fallback, false);
+      };
+      if (this.railSource !== null) {
+        const source = this.buildings.byId(this.railSource); if (!source) return;
+        const start = { x: source.x, z: source.z };
+        if (junction) { netGhost({ buildingId: source.id, port: "out" }, { nodeId: junction.id }, [start, { x: junction.x, z: junction.z }]); return; }
+        const target = this.resolveRailTarget(point.x, point.z, source.id);
+        if (!target) { this.railPreview.visible = false; return; }
+        const end = this.railEndpoint(target.id) ?? { x: target.x, z: target.z };
+        if (!target.valid) { this.drawRailPath([start, end], false); return; }
+        netGhost({ buildingId: source.id, port: "out" }, { buildingId: target.id, port: "in" }, [start, end]);
+        return;
+      }
+      if (this.selectedJunction != null) {
+        const view = this.rails.network.inspect(this.selectedJunction);
+        if (!view) { this.selectedJunction = null; this.railPreview.visible = false; return; }
+        const home = { x: view.x, z: view.z };
+        if (junction && junction.id !== this.selectedJunction) { netGhost({ nodeId: this.selectedJunction }, { nodeId: junction.id }, [home, { x: junction.x, z: junction.z }]); return; }
+        if (Math.hypot(point.x - GAME.depot.x, point.z - GAME.depot.z) <= 4.2) { netGhost({ nodeId: this.selectedJunction }, { buildingId: 0, port: "in" }, [home, { x: GAME.depot.x, z: GAME.depot.z - 1.7 }]); return; }
+        const near = this.buildings.items.find((building) => (building.type === "sweeper" || building.type === "purifier" || building.type === "press") && Math.hypot(point.x - building.x, point.z - building.z) < 2.4);
+        if (!near) { this.railPreview.visible = false; return; }
+        const feed: [NetEnd, NetEnd] = [{ buildingId: near.id, port: "out" }, { nodeId: this.selectedJunction }];
+        const drain: [NetEnd, NetEnd] = [{ nodeId: this.selectedJunction }, { buildingId: near.id, port: "in" }];
+        const [first, second] = view.kind === "split" ? [drain, feed] : [feed, drain];
+        const probe = this.rails.network.preview(first[0], first[1]);
+        const chosen = probe.ok || probe.reason === "blocked" ? first : second;
+        netGhost(chosen[0], chosen[1], [home, { x: near.x, z: near.z }]);
+        return;
+      }
+      this.railPreview.visible = false; return;
     }
-    const x = Math.round(point.x), z = Math.round(point.z); this.ghost.position.set(x, groundHeight(x, z) + 0.04, z); this.ghost.visible = true;
-    const cableValid = this.buildMode !== "generator" || Math.abs(x - GAME.baseCenter.x) + Math.abs(z - GAME.baseCenter.z) <= GAME.generatorCableRange;
-    const valid = cableValid && this.buildings.validPlacement(x, z, BUILDINGS[this.buildMode].radius, this.relocating ?? undefined, this.player.group.position); const color = valid ? 0x66f0d7 : 0xff625f;
+    const x = Math.round(point.x), z = Math.round(point.z); this.buildCursor = { x, z }; this.ghost.position.set(x, groundHeight(x, z) + 0.04, z); this.ghost.visible = true;
+    const cableValid = this.buildMode !== "generator" || this.buildings.generatorReaches(x, z, this.relocating ?? undefined);
+    const forecast = this.buildings.forecastPower(this.buildMode, x, z, this.relocating ?? undefined);
+    const powerValid = !forecast.consumesPower || forecast.connected;
+    const valid = cableValid && powerValid && this.buildings.validPlacement(x, z, BUILDINGS[this.buildMode].radius, this.relocating ?? undefined, this.player.group.position); const color = valid ? 0x66f0d7 : 0xff625f;
     this.ghost.traverse((object) => { if (object instanceof THREE.Mesh) for (const material of Array.isArray(object.material) ? object.material : [object.material]) if ("color" in material) (material as THREE.MeshBasicMaterial).color.setHex(color); });
   }
 
@@ -705,12 +1156,30 @@ class WhiteoutGame {
     if (this.input.consumeAction("KeyQ")) this.scan(); if (this.input.consumeAction("KeyE")) this.interact();
     if (this.input.consumeAction("KeyT")) this.openUpgrades(); if (this.input.consumeAction("KeyU")) this.upgradeNearest(); if (this.input.consumeAction("KeyR")) this.selectRail();
     for (let i = 0; i < TOOLS.length; i++) if (this.input.consumeAction(`Digit${i + 1}`)) this.selectTool(TOOLS[i].id);
-    let click; while ((click = this.input.consumeClick())) { if (click.button === 2) this.cancelBuild(); else if (this.buildMode) { const point = this.groundFromPointer(click.x, click.y); if (point) this.placeAt(point.x, point.z); } }
+    if ((this.railDraft || this.strokePlan) && this.input.consumeAction("Enter")) this.confirmRailDraft();
+    if (this.workDock != null && this.input.consumeAction("Enter")) this.confirmWorkArea();
+    if (this.workDock != null && this.input.consumeAction("Escape")) this.cancelWorkArea();
+    this.followRailDrag();
+    let click; while ((click = this.input.consumeClick())) {
+      if (this.workDock != null) {
+        if (click.button === 2) this.cancelWorkArea();
+        else { const point = this.groundFromPointer(click.x, click.y); if (point) { this.workPoint = { x: point.x, z: point.z }; this.workLocked = true; this.audio.sfx("ui"); this.updateUI(); } }
+        continue;
+      }
+      if (click.button === 2) { if (this.buildMode !== "rail") this.cancelBuild(); }
+      else if (this.buildMode === "rail") { if (!this.input.pointerDown) this.tapRail(click.x, click.y); }
+      else if (this.buildMode) { const point = this.groundFromPointer(click.x, click.y); if (point) this.placeAt(point.x, point.z); }
+    }
+    this.followWorkAim();
+    this.followStroke();
     const zoom = this.input.consumeZoom(); if (zoom) this.cameraZoom = THREE.MathUtils.clamp(this.cameraZoom + zoom * 0.08, 0.72, 1.45);
     this.updateStorm(dt);
     const p = this.player.group.position; let mx = this.input.moveX, mz = -this.input.moveZ; const length = Math.hypot(mx, mz); const moving = length > 0.08 && !this.buildMode;
-    this.sprinting = moving && this.input.sprintHeld && !this.input.clearHeld;
-    const moveSpeed = this.actualSpeed;
+    const clearingHeld = this.input.clearHeld || this.debugClear;
+    this.sprinting = moving && this.input.sprintHeld && !clearingHeld;
+    const equipped = this.toolStats;
+    const depth = THREE.MathUtils.clamp(this.snow.sample(p.x, p.z), 0, 1);
+    const moveSpeed = this.actualSpeed * (clearingHeld ? equipped.pace : 1) * (1 - (1 - equipped.wade) * depth);
     if (moving) {
       mx /= Math.max(1, length); mz /= Math.max(1, length); this.walkTime += dt * moveSpeed;
       this.facing.set(mx, 0, mz).normalize();
@@ -732,30 +1201,37 @@ class WhiteoutGame {
     const ahead = groundHeight(p.x + this.facing.x * 0.5, p.z + this.facing.z * 0.5);
     this.player.visual.rotation.x = THREE.MathUtils.lerp(this.player.visual.rotation.x, THREE.MathUtils.clamp((groundHeight(p.x, p.z) - ahead) * 0.3, -0.16, 0.16), 0.18);
     this.player.visual.rotation.z = THREE.MathUtils.lerp(this.player.visual.rotation.z, 0, 0.18);
-    const brushDistance = this.toolStats.distance + this.clearRadius * 0.35;
-    this.brushPoint.set(p.x + this.facing.x * brushDistance, 0.09, p.z + this.facing.z * brushDistance); this.brushPoint.y = this.snow.heightAt(this.brushPoint.x, this.brushPoint.z) + 0.09;
-    this.effects.targetRing.position.copy(this.brushPoint); this.effects.targetRing.scale.setScalar(this.clearRadius); this.effects.targetRing.visible = !this.buildMode;
+    const brushDistance = this.toolStats.distance;
+    this.brushPoint.set(p.x + this.facing.x * brushDistance, 0.16, p.z + this.facing.z * brushDistance); this.brushPoint.y = this.snow.heightAt(this.brushPoint.x, this.brushPoint.z) + 0.16;
+    this.effects.aim(this.selectedTool, p.x, p.z, this.brushPoint.x, this.brushPoint.z, this.brushPoint.y, this.clearRadius, !this.buildMode);
     let clearing = false;
-    if (this.input.clearHeld && this.load < this.capacity - 0.01 && !this.buildMode && this.toolHealth[this.selectedTool] > 0) {
-      const removed = this.snow.clear(this.brushPoint.x, this.brushPoint.z, this.clearRadius, this.clearRate * dt);
+    if (clearingHeld && this.load < this.capacity - 0.01 && !this.buildMode && this.toolHealth[this.selectedTool] > 0) {
+      const removed = this.snow.clear(this.brushPoint.x, this.brushPoint.z, this.clearRadius, 0, (density) => toolClearRate(equipped, density) * dt);
       if (removed > 0) {
-        const gained = Math.min(removed * this.toolYield, this.capacity - this.load); this.raw += gained; this.collectedRaw += gained; clearing = true;
+        const gained = Math.min(removed * Math.min(1, this.toolYield), this.capacity - this.load); this.raw += gained; this.collectedRaw += gained; clearing = true;
         const previousHealth = this.toolHealth[this.selectedTool];
-        this.toolHealth[this.selectedTool] = Math.max(0, previousHealth - 0.065 * dt);
+        this.toolHealth[this.selectedTool] = Math.max(0, previousHealth - 0.065 * equipped.wear * dt);
         if (previousHealth > 0 && this.toolHealth[this.selectedTool] <= 0) { this.audio.sfx("warning"); this.ui.notify(this.t("toast.toolBroken"), "danger"); }
         this.effects.spray(this.brushPoint.x, this.brushPoint.y + 0.12, this.brushPoint.z, this.facing.x, this.facing.z);
       }
     }
     this.audio.setClearing(clearing); this.character.update(dt, moving, clearing, this.selectedTool, this.interactionAnim > 0.82, this.sprinting);
     const activeTool = this.player.tools[this.selectedTool]; const spin = activeTool.getObjectByName("spin");
-    if (spin && (clearing || this.selectedTool === "blower")) spin.rotation.z += dt * (clearing ? 18 : 2);
+    if (spin && (clearing || this.selectedTool === "blower")) spin.rotation[this.selectedTool === "brush" ? "x" : "z"] += dt * (clearing ? 18 : 2);
 
     if (this.buildings.warmingAt(p.x, p.z)) this.heat = Math.min(100, this.heat + GAME.heatRecharge * dt);
-    else { const drain = this.stormPhase === "storm" ? GAME.stormHeatDrain : GAME.heatDrain; this.heat = Math.max(0, this.heat - drain * this.heatFactor * (this.sprinting ? GAME.sprintHeatMultiplier : 1) * dt); }
+    else { const drain = this.stormPhase === "storm" ? GAME.stormHeatDrain : GAME.heatDrain; this.heat = Math.max(0, this.heat - drain * this.heatFactor * (this.sprinting ? GAME.sprintHeatMultiplier : 1) * (clearingHeld ? equipped.heat : 1) * dt); }
     if (this.heat >= 45) this.heatWarningArmed = true;
     else if (this.heatWarningArmed && this.heat < 28 && this.heat > 0) { this.heatWarningArmed = false; this.ui.notify(this.t("toast.heatLow"), "danger"); }
     for (const core of this.world.cores) if (!core.scanned && !core.recovered && this.snow.sample(core.x, core.z) < 0.22 && Math.hypot(core.x - p.x, core.z - p.z) < 3.2) { core.scanned = true; this.ui.notify(this.t("toast.discovered"), "info"); }
-    this.world.updateCores(this.snow); this.buildings.setAuxiliaryZones(this.relays.zones()); this.buildings.update(dt, this.snow, this.stormIntensity, p, p); this.rails.update(dt); this.updateQuest(); this.updatePrompt(); this.updateGhost();
+    this.world.updateCores(this.snow);
+    this.buildings.setRelaySites(this.relays.items.map((relay) => ({ id: relay.id, x: relay.x, z: relay.z, repaired: relay.repaired })));
+    const relayLive = (id: RelayId) => this.relays.repaired(id) && this.buildings.relayPowered(id);
+    this.buildings.setRelayBoosts(relayLive("servo") ? 1.3 : 1, relayLive("foundry") ? 1.3 : 1);
+    this.buildings.setAuxiliaryZones(this.relays.items.filter((relay) => relayLive(relay.id)).map((relay) => ({ x: relay.x, z: relay.z, r: relay.warmth })));
+    this.buildings.update(dt, this.snow, this.stormIntensity, p, p);
+    for (const relay of this.relays.items) this.relays.setLive(relay.id, this.buildings.relayPowered(relay.id));
+    this.rails.update(dt); this.updateQuest(); this.updatePrompt(); this.updateGhost();
     const frozenCount = this.buildings.frozenCount();
     if (frozenCount < this.lastFrozenCount) { const p2 = this.player.group.position; this.ui.notify(this.t("toast.robotSaved"), "warm"); this.effects.burst(p2.x, p2.y + 1, p2.z, COLORS.cyan, 22); }
     this.lastFrozenCount = frozenCount;
@@ -763,6 +1239,25 @@ class WhiteoutGame {
     this.currentPose.position.copy(this.player.group.position); this.currentPose.yaw = this.player.group.rotation.y;
     if (this.saveTimer >= 10) { this.saveTimer = 0; this.saveGame(); }
     if (this.uiTimer <= 0) { this.uiTimer = 0.1; this.audio.setStorm(this.stormIntensity); this.updateUI(); }
+  }
+
+  private segmentHitsCircle(ax: number, az: number, bx: number, bz: number, cx: number, cz: number, radius: number): boolean {
+    const abx = bx - ax; const abz = bz - az; const len2 = abx * abx + abz * abz;
+    const t = len2 < 1e-6 ? 0 : THREE.MathUtils.clamp(((cx - ax) * abx + (cz - az) * abz) / len2, 0, 1);
+    const dx = ax + abx * t - cx; const dz = az + abz * t - cz;
+    return dx * dx + dz * dz < radius * radius;
+  }
+  /** Pull the camera inward and upward when a backdrop mountain crosses the view. */
+  private fitCamera(px: number, pz: number, mobile: boolean, zoom: number): { x: number; y: number; z: number } {
+    let horizontal = (mobile ? Math.hypot(17, 21) : Math.hypot(14, 18)) * zoom;
+    let height = (mobile ? 23 : 20) * zoom;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const x = px + Math.sin(this.cameraAzimuth) * horizontal; const z = pz + Math.cos(this.cameraAzimuth) * horizontal;
+      const blocked = this.world.vista.some((mountain) => this.segmentHitsCircle(px, pz, x, z, mountain.x, mountain.z, mountain.r + 1.4));
+      if (!blocked) return { x, y: height, z };
+      horizontal *= 0.74; height += 1.8;
+    }
+    return { x: px + Math.sin(this.cameraAzimuth) * horizontal, y: height, z: pz + Math.cos(this.cameraAzimuth) * horizontal };
   }
 
   private render(alpha: number): void {
@@ -779,8 +1274,8 @@ class WhiteoutGame {
       const a = this.visualTime * 0.1 + 0.6; this.desiredCamera.set(Math.sin(a) * 36, 23, 8 + Math.cos(a) * 36); this.cameraTarget.set(0, 1.5, 9);
     } else {
       const mobile = this.input.isCoarse; const z = this.cameraZoom;
-      const horizontal = (mobile ? Math.hypot(17, 21) : Math.hypot(14, 18)) * z;
-      this.desiredCamera.set(p.x + Math.sin(this.cameraAzimuth) * horizontal, (mobile ? 23 : 20) * z, p.z + Math.cos(this.cameraAzimuth) * horizontal);
+      const fitted = this.fitCamera(p.x, p.z, mobile, z);
+      this.desiredCamera.set(fitted.x, fitted.y, fitted.z);
       this.cameraTarget.set(p.x, p.y + 0.9, p.z - 1.3);
     }
     this.cameraControls.smoothTime = this.cinematic.active ? 0.16 : this.state.is("title") ? 0.4 : 0.1;
@@ -816,16 +1311,27 @@ class WhiteoutGame {
     const purifier = this.buildings.items.find((b) => b.type === "purifier"); const press = this.buildings.items.find((b) => b.type === "press");
     switch (this.questIndex) {
       case 0: if (this.raw > 0) { x = GAME.depot.x; z = GAME.depot.z; key = "objective.depot"; } break;
-      case 1: x = 3; z = -2; key = "objective.purifierBuild"; break;
+      case 1:
+        if (this.credits < BUILDINGS.purifier.cost && this.buildings.count("purifier") === 0) {
+          const snow = this.fundedSnowTarget();
+          if (snow) { x = snow.x; z = snow.z; key = "objective.snowFund"; break; }
+        }
+        x = 3; z = -2; key = "objective.purifierBuild"; break;
       case 2: x = purifier?.x ?? 3; z = purifier?.z ?? -2; key = "objective.produce"; break;
       case 3: x = GAME.depot.x; z = GAME.depot.z; key = "objective.depot"; break;
       case 4: x = -3; z = -3; key = "objective.pressBuild"; break;
       case 5: if (this.ice > 0 || !press) { x = GAME.depot.x; z = GAME.depot.z; key = "objective.depot"; } else { x = press.x; z = press.z; key = "objective.press"; } break;
       case 6: { const source = this.railGuideTarget(); x = source.x; z = source.z; key = "objective.rail"; break; }
       case 7: x = 8; z = -6; key = "objective.robot"; break;
-      case 8: { const site = this.world.heaterSites[this.buildings.count("heater") % this.world.heaterSites.length]; x = site.x; z = site.z; key = "objective.heater"; break; }
+      case 8: {
+        const site = this.world.heaterSites.find((candidate) => !this.buildings.items.some((building) => building.type === "heater" && Math.hypot(building.x - candidate.x, building.z - candidate.z) < 2.4) && this.buildings.forecastPower("heater", candidate.x, candidate.z).connected);
+        const pad = site ?? this.openPowerPad("heater");
+        if (pad) { x = pad.x; z = pad.z; key = "objective.heater"; }
+        else { const generator = this.generatorGuide(); x = generator.x; z = generator.z; key = "objective.generator"; }
+        break;
+      }
       case 9:
-        if (!this.cleanupCertified) { const dense = this.snow.findDense(p.x, p.z, 70); x = dense?.x ?? p.x; z = dense?.z ?? p.z; key = "objective.cleanup"; }
+        if (!this.cleanupCertified) { const patch = this.cleanupGuide(); x = patch?.x ?? p.x; z = patch?.z ?? p.z; key = "objective.cleanup"; }
         else if (this.recovered < 3) { const core = this.world.cores.find((c) => !c.recovered); x = core?.x ?? p.x; z = core?.z ?? p.z; key = "objective.evidence"; }
         else { x = GAME.baseCenter.x; z = GAME.baseCenter.z; key = "objective.base"; }
         break;
@@ -838,8 +1344,43 @@ class WhiteoutGame {
     return this.salesHistory.reduce((sum, sale) => sum + sale.amount, 0);
   }
 
+  private buildingLabel(id: number): string {
+    if (id === 0) return this.t("rail.depot");
+    const building = id > 0 ? this.buildings.byId(id) : undefined;
+    return building ? this.t(`building.${building.type}.name`) : "—";
+  }
+  private junctionView(): GameSnapshot["junction"] {
+    if (this.selectedJunction == null || this.networkDraft) return null;
+    const view = this.rails.network.inspect(this.selectedJunction); if (!view) return null;
+    return { id: view.id, kind: view.kind, policy: view.policy, ratio: view.ratio, backlog: view.backlog, sentA: view.sentA, sentB: view.sentB, destA: this.buildingLabel(view.destA), destB: this.buildingLabel(view.destB), blocked: view.blocked };
+  }
+  private railEditorView(): GameSnapshot["railEditor"] {
+    const stroke = this.strokePlan;
+    if (stroke && this.buildMode === "rail") return {
+      sourceId: Math.max(0, stroke.sourceId), destinationId: Math.max(0, stroke.destinationId),
+      sourceName: this.endpointLabel(stroke.sourceId), destinationName: this.endpointLabel(stroke.destinationId),
+      kind: stroke.kind ?? "raw", points: Math.max(0, stroke.points.length - 2), valid: stroke.ok, blocked: !stroke.ok,
+      cost: stroke.cost, extra: stroke.cost, selected: null, existing: stroke.reason === "reuse", network: true,
+    };
+    const net = this.networkDraft;
+    if (net && this.buildMode === "rail") return { sourceId: 0, destinationId: 0, sourceName: net.sourceName, destinationName: net.destinationName, kind: net.kind, points: 0, valid: net.valid, blocked: !net.valid, cost: net.cost, extra: net.cost, selected: null, existing: false, network: true };
+    const draft = this.railDraft;
+    if (!draft || this.buildMode !== "rail") return null;
+    const view = this.draftQuote(); if (!view) return null;
+    const destination = draft.destinationId === 0 ? null : this.buildings.byId(draft.destinationId);
+    const kind = this.buildings.cargoKind(view.source);
+    if (!kind) return null;
+    return {
+      sourceId: draft.sourceId, destinationId: draft.destinationId,
+      sourceName: this.t(`building.${view.source.type}.name`),
+      destinationName: destination ? this.t(`building.${destination.type}.name`) : this.t("rail.depot"),
+      kind, points: Math.max(0, draft.controls.length - 2), valid: view.valid, blocked: view.blocked,
+      cost: view.quote.cost, extra: view.extra, selected: draft.selected, existing: draft.existing, network: false,
+    };
+  }
   private snapshot(): GameSnapshot {
     const views = this.buildings.views(this.player.group.position.x, this.player.group.position.z);
+    for (const view of views) view.dispatching = this.rails.hasSource(view.id);
     const nearest = this.buildings.nearest(this.player.group.position.x, this.player.group.position.z);
     const questTarget = QUESTS[this.questIndex].target;
     const questValue = Math.min(questTarget, this.questProgress());
@@ -852,15 +1393,19 @@ class WhiteoutGame {
       radarCharges: this.radarCharges, radarMaxCharges: this.radarMaxCharges, radarBatteryCost: this.radarBatteryCost,
       stormPhase: this.stormPhase, stormTimer: this.stormTimer,
       stormEta: Math.max(0, this.nextStormAt - this.runTime), stormCycle: Math.max(0, this.nextSevereStorm - this.stormCount),
-      stormCount: this.stormCount, severeStorm: this.severeStorm,
+      stormCount: this.stormCount, severeStorm: this.severeStorm, galeLive: this.buildings.relayPowered("gale"),
       radarActive: this.radarActive, sprinting: this.sprinting, worldSize: GAME.worldSize,
       cleanupPercent: this.snow.cleanupPercent, cleanupCertified: this.cleanupCertified, rawSold: this.rawSold, salesPerMinute: this.salesPerMinute, prompt: this.prompt, runTime: this.runTime, produced: this.produced, sold: this.sold, iceSold: this.iceSold, speed: this.actualSpeed,
       upgrades: { ...this.upgrades }, tools: { ...this.tools }, toolHealth: { ...this.toolHealth }, selectedTool: this.selectedTool, muted: this.audio.muted, lowQuality: this.lowQuality, hasSave: this.hasSave,
       quest: { index: this.questIndex, total: QUESTS.length, progress: questProgress, target: questTarget, reward: QUESTS[this.questIndex].reward },
       objective: this.objective(), buildings: views, nearestBuilding: nearest ? views.find((v) => v.id === nearest.id)! : null,
-      buildMode: this.buildMode, railSource: this.railSource, railCount: this.rails.items.length, robotCount: this.buildings.robotCount(), frozenRobots: this.buildings.frozenCount(), settings: { ...this.settings },
+      buildMode: this.buildMode, railSource: this.railSource, railCount: this.rails.items.length, railEditor: this.railEditorView(),
+      junction: this.junctionView(), railSelection: this.railSelectionView(), railTools: this.buildMode === "rail" && !this.railEditorView() && !this.networkDraft && !this.strokePlan,
+      buildPreview: this.buildMode && this.buildMode !== "rail" && this.buildCursor ? { ...this.buildings.forecastPower(this.buildMode, this.buildCursor.x, this.buildCursor.z, this.relocating ?? undefined), ...this.buildCursor } : null,
+      workAim: this.workDock == null ? null : { buildingId: this.workDock, x: this.workPoint?.x ?? 0, z: this.workPoint?.z ?? 0, radius: workAreaRadius(this.buildings.byId(this.workDock)?.level ?? 1), locked: this.workLocked },
+      robotCount: this.buildings.robotCount(), frozenRobots: this.buildings.frozenCount(), settings: { ...this.settings },
       chunks: this.snow.chunkViews(), chunkSize: this.snow.chunkSize, chunkColumns: this.snow.chunkColumns,
-      relays: this.relays.views(this.player.group.position.x, this.player.group.position.z), events: this.events.map((event) => ({ ...event })),
+      relays: this.relays.views(this.player.group.position.x, this.player.group.position.z).map((relay) => ({ ...relay, powered: this.buildings.relayPowered(relay.id) })), events: this.events.map((event) => ({ ...event })),
       windX: GAME.windX, windZ: GAME.windZ,
       cinematic: { active: this.cinematic.active, time: this.cinematic.time, duration: this.cinematic.duration },
       tutorial: this.tutorial.view(),
@@ -869,9 +1414,7 @@ class WhiteoutGame {
   private updateUI(): void { const snapshot = this.snapshot(); this.world.setObjective(snapshot.objective.x, snapshot.objective.z, snapshot.state === "playing"); this.world.setHeaterSitesVisible(snapshot.state === "playing" && snapshot.quest.index === 8); this.ui.update(snapshot); }
   private resize(): void {
     this.camera.aspect = innerWidth / innerHeight; this.camera.updateProjectionMatrix(); this.renderer.setSize(innerWidth, innerHeight, false);
-    const portraitTouch = matchMedia("(pointer: coarse)").matches && innerHeight > innerWidth;
     this.input.resetAll(); this.tutorial.updateFrame();
-    if (portraitTouch && this.state.is("playing") && !this.cinematic.active && !this.tutorial.active) this.pause();
     this.ui.showState(this.state.state, this.pausePanel);
     this.updateUI();
   }
@@ -944,7 +1487,7 @@ class WhiteoutGame {
       nextStormAt: Math.max(save.runTime, save.nextStormAt ?? save.runTime + GAME.stormIntervalMin),
       nextSevereStorm: Math.max(5, Math.floor(save.nextSevereStorm ?? 6)),
       stormPhase: save.stormPhase ?? "calm", stormTimer: Math.max(0, save.stormTimer ?? 0), severeStorm: save.severeStorm ?? false,
-      upgrades: levels, tools, rails,
+      upgrades: levels, tools, rails, railNetwork: Array.isArray(save.railNetwork?.nodes) && Array.isArray(save.railNetwork?.edges) ? save.railNetwork : undefined,
     };
   }
   private saveGame(): void {
@@ -960,7 +1503,7 @@ class WhiteoutGame {
       upgrades: { ...this.upgrades }, tools: { ...this.tools }, toolHealth: { ...this.toolHealth }, selectedTool: this.selectedTool, salesHistory: this.salesHistory.filter((sale) => sale.time > this.runTime - 60),
       player: { x: this.player.group.position.x, z: this.player.group.position.z }, snow: this.snow.serialize(),
       cores: this.world.cores.map((c) => ({ id: c.id, scanned: c.scanned, revealed: c.revealed, recovered: c.recovered })),
-      buildings: this.buildings.serialize(), rails: this.rails.serialize(),
+      buildings: this.buildings.serialize(), rails: this.rails.serialize(), railNetwork: this.rails.network.serialize(),
       relays: this.relays.serialize(), events: this.events.map((event) => ({ ...event })),
     };
     this.hasSave = storage.set(GAME.saveKey, data);
@@ -977,9 +1520,12 @@ class WhiteoutGame {
     this.stormIntensity = this.stormPhase === "storm" ? this.severeStorm ? 1.22 : 1 : this.stormPhase === "warning" ? 0.16 : 0;
     this.upgrades = { ...blankUpgrades(), ...save.upgrades }; this.tools = { ...blankTools(), ...save.tools }; this.toolHealth = { ...fullToolHealth(), ...save.toolHealth }; this.salesHistory = save.salesHistory.map((sale) => ({ ...sale })); this.selectedTool = save.selectedTool;
     this.player.group.position.set(save.player.x, this.snow.heightAt(save.player.x, save.player.z), save.player.z); this.physics.reset(save.player.x, save.player.z);
-    this.snow.restore(save.snow); this.buildings.restore(save.buildings); this.buildings.restoreRetained(save.retainedCargo); this.rails.restore(save.rails); this.relays.restore(save.relays);
+    this.snow.restore(save.snow); this.buildings.restore(save.buildings); this.buildings.restoreRetained(save.retainedCargo); this.rails.restore(save.rails); this.rails.network.restore(save.railNetwork as NetSave | undefined); this.relays.restore(save.relays);
     this.saleRemainder = Math.max(0, Number(save.saleCreditRemainder) || 0);
-    this.buildings.setAuxiliaryZones(this.relays.zones()); this.buildings.setRelayBoosts(this.relays.repaired("servo") ? 1.3 : 1, this.relays.repaired("foundry") ? 1.3 : 1);
+    this.buildings.setRelaySites(this.relays.items.map((relay) => ({ id: relay.id, x: relay.x, z: relay.z, repaired: relay.repaired })));
+    this.buildings.refreshPowerGrid();
+    this.buildings.setAuxiliaryZones(this.relays.items.filter((relay) => this.buildings.relayPowered(relay.id)).map((relay) => ({ x: relay.x, z: relay.z, r: relay.warmth })));
+    this.buildings.setRelayBoosts(this.buildings.relayPowered("servo") ? 1.3 : 1, this.buildings.relayPowered("foundry") ? 1.3 : 1);
     for (const building of this.buildings.items) this.clearBuildingPad(building.x, building.z, BUILDINGS[building.type].radius);
     if (!this.tools[this.selectedTool]) this.selectedTool = "hands";
     for (const view of save.cores) { const core = this.world.cores.find((c) => c.id === view.id); if (core) { core.scanned = view.scanned; core.revealed = view.revealed; core.recovered = view.recovered; core.body.visible = view.revealed && !view.recovered; } }
@@ -989,7 +1535,7 @@ class WhiteoutGame {
 
   private installDebug(): void {
     window.__whiteoutDebug = {
-      snapshot: () => this.snapshot(), start: () => this.startRun(false), pause: () => this.pause(), resume: () => this.resume(), save: () => this.saveGame(),
+      snapshot: () => this.snapshot(), start: () => this.startRun(false), continue: () => this.continueRun(), pause: () => this.pause(), resume: () => this.resume(), save: () => this.saveGame(),
       teleport: (x: number, z: number) => { this.player.group.position.set(x, this.snow.heightAt(x, z), z); this.physics.reset(x, z); },
       giveCredits: (n: number) => { this.credits += n; this.updateUI(); }, setRaw: (n: number) => { this.raw = n; this.collectedRaw = Math.max(this.collectedRaw, n); this.updateQuest(); this.updateUI(); },
       setCarried: (pure: number, ice: number) => { this.purified = pure; this.ice = ice; this.updateUI(); }, setPower: (n: number) => { this.power = n; this.updateQuest(); this.updateUI(); },
@@ -997,21 +1543,39 @@ class WhiteoutGame {
       setRailDelivered: (n: number) => { this.railDelivered = Math.max(0, n); this.updateUI(); },
       scan: () => this.scan(), interact: () => this.interact(), buyTool: (id: ToolId) => this.buyTool(id), buyUpgrade: (id: UpgradeId) => this.buyUpgrade(id), buyBattery: () => this.buyBattery(), selectTool: (id: ToolId) => this.selectTool(id), repairTool: (id: ToolId) => this.repairTool(id), openUpgrades: () => this.openUpgrades(),
       build: (type: BuildingType, x: number, z: number) => { const b = this.buildings.build(type, x, z, () => true); if (b) this.clearBuildingPad(x, z, BUILDINGS[type].radius); this.updateQuest(); this.updateUI(); return b?.id; },
-      buyBuilding: (type: BuildingType, x: number, z: number) => { const b = this.buildings.build(type, x, z, (cost) => this.charge(cost)); if (b) this.clearBuildingPad(x, z, BUILDINGS[type].radius); this.updateQuest(); this.updateUI(); return b?.id; },
+      buyBuilding: (type: BuildingType, x: number, z: number) => {
+        if (type === "generator" && !this.buildings.generatorReaches(x, z)) return undefined;
+        if (!this.confirmPowerPlacement(type, x, z)) return undefined;
+        const b = this.buildings.build(type, x, z, (cost) => this.charge(cost)); if (b) this.clearBuildingPad(x, z, BUILDINGS[type].radius); this.updateQuest(); this.updateUI(); return b?.id;
+      },
       selectBuild: (type: BuildingType) => this.selectBuild(type), ghostCount: () => this.ghost.children.reduce((sum, group) => { let count = 0; group.traverse((o) => { if (o instanceof THREE.Mesh) count++; }); return sum + count; }, 0),
       visualState: () => ({ tools: Object.fromEntries(Object.entries(this.player.tools).map(([id, group]) => [id, group.visible])), footprints: this.effects.footprintTotalCount, activeFootprints: this.effects.activeFootprintCount, stormStreaks: this.effects.stormVisible, stormIntensity: this.stormIntensity, character: this.character.state(), facingX: this.facing.x, facingZ: this.facing.z, yaw: this.player.group.rotation.y }),
       buildingVisuals: () => this.buildings.visualDetails(),
       rail: (sourceId: number, destinationId?: number) => {
         const b = this.buildings.byId(sourceId); if (!b) return false;
         const kind = this.buildings.cargoKind(b); const dest = destinationId ?? (kind === "raw" ? this.buildings.items.find((it) => it.type === "purifier")?.id ?? 0 : 0);
-        const target = this.buildings.byId(dest); const dx = dest === 0 ? GAME.depot.x : target?.x ?? GAME.depot.x; const dz = dest === 0 ? GAME.depot.z - 3.2 : target?.z ?? GAME.depot.z - 3.2;
+        const target = this.buildings.byId(dest); const dx = dest === 0 ? GAME.depot.x : target?.x ?? GAME.depot.x; const dz = dest === 0 ? GAME.depot.z - 1.7 : target?.z ?? GAME.depot.z - 1.7;
         const r = this.rails.create(sourceId, dest, RailSystem.pathFor(b.x, b.z, dx, dz), () => true); this.updateUI(); return !!r;
       },
       buyRail: (sourceId: number, destinationId?: number) => {
         const b = this.buildings.byId(sourceId); if (!b) return false;
         const kind = this.buildings.cargoKind(b); const dest = destinationId ?? (kind === "raw" ? this.buildings.items.find((it) => it.type === "purifier")?.id ?? 0 : 0);
-        const target = this.buildings.byId(dest); const dx = dest === 0 ? GAME.depot.x : target?.x ?? GAME.depot.x; const dz = dest === 0 ? GAME.depot.z - 3.2 : target?.z ?? GAME.depot.z - 3.2;
+        const target = this.buildings.byId(dest); const dx = dest === 0 ? GAME.depot.x : target?.x ?? GAME.depot.x; const dz = dest === 0 ? GAME.depot.z - 1.7 : target?.z ?? GAME.depot.z - 1.7;
         const r = this.rails.create(sourceId, dest, RailSystem.pathFor(b.x, b.z, dx, dz), (cost) => this.charge(cost)); this.updateUI(); return !!r;
+      },
+      editRail: (sourceId: number, destinationId: number, points: RailPathPoint[]) => {
+        const source = this.buildings.byId(sourceId); const end = this.railEndpoint(destinationId);
+        if (!source || !end) return { ok: false, reason: "missing", extra: 0, total: 0 };
+        const existing = this.rails.find(sourceId, destinationId);
+        this.buildMode = "rail"; this.input.mode = "build"; this.input.cameraRotate = true;
+        this.openRailDraft(sourceId, destinationId, [{ x: source.x, z: source.z }, ...points, end], existing?.lane ?? this.rails.nextLane(), existing?.paid ?? 0, !!existing);
+        return this.confirmRailDraft();
+      },
+      selectRail: () => this.selectRail(),
+      worldToScreen: (x: number, z: number) => {
+        const projected = new THREE.Vector3(x, groundHeight(x, z) + 1.2, z).project(this.camera);
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        return { x: (projected.x * 0.5 + 0.5) * rect.width + rect.left, y: (-projected.y * 0.5 + 0.5) * rect.height + rect.top, behind: projected.z > 1 };
       },
       setOutput: (id: number, n: number) => { const b = this.buildings.byId(id); if (b) b.output = n; }, setInput: (id: number, n: number) => { const b = this.buildings.byId(id); if (b) b.input = n; },
       upgradeNearest: () => this.upgradeNearest(),
@@ -1026,6 +1590,7 @@ class WhiteoutGame {
         health: r.health, carry: r.carry, mode: r.mode, energy: r.energy,
         zoneAuto: r.zoneAuto, zoneX: r.zoneX, zoneZ: r.zoneZ, zoneRange: r.zoneRange, zoneMode: r.zoneMode,
         activeChunk: r.activeChunk, chunkIds: [...r.chunkIds], chunkProgress: r.chunkProgress, searchRange: r.searchRange,
+        lane: r.planLane, sweep: r.planCursor,
         pathLength: r.path.length, pathIndex: r.pathIndex, yaw: r.group.rotation.y, repairAllowed: r.repairAllowed, paymentWait: r.paymentWait, rescueProgress: r.rescue,
         sourceId: r.sourceId, destinationId: r.destinationId,
         targetX: r.target?.x ?? null, targetZ: r.target?.z ?? null,
@@ -1034,8 +1599,15 @@ class WhiteoutGame {
       buyExtraRobot: (buildingId: number) => this.buyExtraRobot(buildingId),
       setRobotZone: (buildingId: number, slot: number, auto: boolean, x?: number, z?: number, range?: number) => this.setRobotZone(buildingId, slot, auto, range ?? 16, x, z),
       setRobotZoneMode: (buildingId: number, slot: number, mode: RobotZoneMode, chunkId?: number) => this.setRobotZoneMode(buildingId, slot, mode, chunkId),
+      assignWorkArea: (buildingId: number, x: number, z: number) => this.buildings.assignWorkArea(buildingId, x, z),
+      clearWorkArea: (buildingId: number) => this.buildings.clearWorkArea(buildingId),
       repairRelay: (id: RelayId) => this.repairRelay(id), openLog: () => this.openLog(), openRobots: () => this.openRobots(),
       heaterSites: () => this.world.heaterSites.map((site) => ({ ...site })),
+      obstacles: () => this.world.obstacles.map((obstacle) => ({ ...obstacle })),
+      vista: () => this.world.vista.map((mountain) => ({ ...mountain })),
+      frameStats: () => ({ calls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles, fps: this.measuredFps }),
+      cameraPose: () => ({ x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z }),
+      setAzimuth: (azimuth: number) => { this.cameraAzimuth = azimuth; },
       storm: (severe = false) => { this.forceNextSevere = severe; if (severe) this.nextSevereStorm = this.stormCount + 1; this.nextStormAt = this.runTime; this.stormPhase = "warning"; },
       repairBuilding: (id: number) => { const building = this.buildings.byId(id); const repaired = building?.damaged ? this.buildings.repair(id, (cost) => this.charge(cost)) : this.buildings.serviceRobots(id, (cost) => this.charge(cost)); if (repaired) this.audio.sfx("repair"); this.updateUI(); return repaired; },
       damageBuilding: (id: number) => { const damaged = this.buildings.damage(id); this.updateUI(); return damaged; },
@@ -1045,8 +1617,24 @@ class WhiteoutGame {
       setToolHealth: (id: ToolId, health: number) => { this.toolHealth[id] = THREE.MathUtils.clamp(health, 0, 100); this.updateUI(); },
       audioState: () => this.audio.state(), baseVisual: () => this.world.baseVisual(),
       toolStats: (id: ToolId, level: number) => toolTierStats(id, level),
+      holdClear: (held: boolean) => { this.debugClear = held; },
+      snowMass: () => this.snow.totalRemaining,
+      paintSnow: (x: number, z: number, radius: number, density: number) => this.snow.paintDisk(x, z, radius, density),
+      snowDisk: (x: number, z: number, radius: number) => this.snow.diskMass(x, z, radius),
+      walk: (x: number, z: number) => { this.input.moveX = x; this.input.moveZ = z; },
+      aimPoint: () => ({ x: this.brushPoint.x, z: this.brushPoint.z, radius: this.clearRadius, px: this.player.group.position.x, pz: this.player.group.position.z }),
+      aimMarkers: () => this.effects.aimMarkers(),
       grounding: () => ({ playerY: this.player.group.position.y, physicsFootY: this.physics.footY, snowHeight: this.snow.heightAt(this.player.group.position.x, this.player.group.position.z), groundHeight: groundHeight(this.player.group.position.x, this.player.group.position.z), soleY: this.player.group.position.y + this.player.body.position.y - 0.23 }),
       freezeRobot: (id: number, slot = 0) => { const r = this.buildings.byId(id)?.robots.find((robot) => robot.slot === slot); if (!r) return false; r.group.position.set(30 + slot * 2, groundHeight(30 + slot * 2, 30), 30); r.temperature = 0; r.frozen = true; r.rescue = 0; r.thaw = 0; r.frost.visible = true; this.updateUI(); return true; },
+      placeRobot: (id: number, slot: number, x: number, z: number) => {
+        const robot = this.buildings.byId(id)?.robots.find((unit) => unit.slot === slot);
+        if (!robot) return false;
+        robot.group.position.set(x, groundHeight(x, z) + (robot.kind === "hauler" ? 0.18 : 0.06), z);
+        robot.path = []; robot.pathIndex = 0; robot.target = null; robot.stuck = 0; robot.pathGoal = { x: Number.NaN, z: Number.NaN };
+        robot.returning = false; robot.mode = robot.frozen ? "wait" : robot.kind === "hauler" ? "patrol" : "seek";
+        return true;
+      },
+      freezeLog: () => this.buildings.freezeEvents.map((event) => ({ ...event })),
       setRepairAllowed: (id: number, slot: number, allowed: boolean) => this.buildings.setRepairAllowed(id, slot, allowed),
       rescueAt: (x: number, z: number) => this.buildings.startRescue(x, z),
       setRobotCarry: (id: number, slot: number, carry: number) => { const robot = this.buildings.byId(id)?.robots.find((unit) => unit.slot === slot); if (!robot) return false; robot.carry = Math.max(0, carry); robot.returning = robot.kind === "sweeper" && robot.carry > 0.01; if (robot.returning) robot.mode = "return"; return true; },
@@ -1058,10 +1646,28 @@ class WhiteoutGame {
       applyFpsSample: (fps: number, hidden = false) => { this.considerQuality(fps, hidden); return { lowQuality: this.lowQuality, lowStreak: this.fpsLowStreak, highStreak: this.fpsHighStreak, hold: this.qualityHold }; },
       cameraState: () => ({ railMode: this.buildMode === "rail", rotationEnabled: this.input.cameraRotate, azimuth: this.cameraAzimuth, distance: Math.hypot(this.desiredCamera.x - this.player.group.position.x, this.desiredCamera.z - this.player.group.position.z) }),
       powerState: () => this.buildings.powerSnapshot(),
+      powerPreview: (type: BuildingType, x: number, z: number, ignoreId?: number) => this.buildings.forecastPower(type, x, z, ignoreId),
       win: () => { this.questIndex = 9; this.power = 100; this.recovered = 3; this.snow.restore(Array(160 * 160).fill(0)); this.updateQuest(); }, lose: () => this.gameOver(),
       step: (seconds: number) => { for (let i = 0, count = Math.min(18000, Math.ceil(seconds * 60)); i < count; i++) this.update(1 / 60); this.updateUI(); },
       snowAt: (x: number, z: number) => this.snow.sample(x, z), groundAt: (x: number, z: number) => groundHeight(x, z),
-      railState: () => this.rails.items.map((r) => { let corners = 0, modernRails = 0, oneWayArrows = 0; r.group.traverse((o) => { if (o.userData.corner) corners++; if (o.userData.modernRail) modernRails++; if (o.userData.oneWay) oneWayArrows++; }); return { sourceId: r.sourceId, destinationId: r.destinationId, kind: r.kind, total: r.total, corners, modernRails, oneWayArrows, activeCapsules: r.capsules.filter((c) => c.active).length, cargo: r.capsules.reduce((sum, c) => sum + c.cargo, 0), capsules: r.capsules.map((c) => ({ active: c.active, cargo: c.cargo, distance: c.distance, waiting: c.wait > 0, visible: c.group.visible })) }; }),
+      railState: () => this.rails.items.map((r) => { let corners = 0, modernRails = 0, oneWayArrows = 0; r.group.traverse((o) => { if (o.userData.corner) corners++; if (o.userData.modernRail) modernRails++; if (o.userData.oneWay) oneWayArrows++; }); const mid = r.travel[Math.floor(r.travel.length / 2)] ?? r.path[0]; return { sourceId: r.sourceId, destinationId: r.destinationId, kind: r.kind, total: r.total, corners, modernRails, oneWayArrows, lane: r.lane, routed: r.routed, paid: r.paid, path: r.path.map((point) => ({ ...point })), midpoint: { x: mid.x, z: mid.z }, activeCapsules: r.capsules.filter((c) => c.active).length, cargo: r.capsules.reduce((sum, c) => sum + c.cargo, 0), capsules: r.capsules.map((c) => ({ active: c.active, cargo: c.cargo, distance: c.distance, waiting: c.wait > 0, visible: c.group.visible })) }; }),
+      netPlace: (kind, x, z) => this.rails.network.place(kind, x, z),
+      netLink: (from, to) => this.rails.network.link(from, to, (cost) => this.charge(cost)),
+      previewStroke: (points: RailPathPoint[]) => this.rails.network.previewStroke(points),
+      commitStroke: (points: RailPathPoint[]) => { const result = this.rails.network.commitStroke(points, (cost) => this.charge(cost)); if (result.ok) this.saveGame(); this.updateUI(); return result; },
+      deleteEdge: (edgeId: number) => { const result = this.rails.network.removeEdge(edgeId); if (result.ok) this.saveGame(); this.updateUI(); return result; },
+      reshapeEdge: (edgeId: number, points: RailPathPoint[]) => { const result = this.rails.network.reshape(edgeId, points, (cost) => this.charge(cost)); if (result.ok) this.saveGame(); this.updateUI(); return result; },
+      buildingSpan: (type: BuildingType) => {
+        const building = this.buildings.items.find((item) => item.type === type); if (!building) return null;
+        const box = new THREE.Box3();
+        building.group.traverse((object) => { if (object instanceof THREE.Mesh && !(object.geometry instanceof THREE.RingGeometry)) box.expandByObject(object); });
+        const size = box.getSize(new THREE.Vector3());
+        return { x: size.x, y: size.y, z: size.z };
+      },
+      netPolicy: (id, policy, ratio, priority) => this.rails.network.policy(id, policy, ratio, priority),
+      netState: () => this.rails.network.state(),
+      netVisual: () => this.rails.network.visual(),
+      netReshape: (edgeId, points) => this.rails.network.reshape(edgeId, points, (cost) => this.charge(cost)),
       stats: () => ({ fps: this.measuredFps, calls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles, lowQuality: this.lowQuality, renderer: this.gpuName }),
     };
   }
@@ -1070,6 +1676,21 @@ class WhiteoutGame {
     this.input.dispose(); this.cameraControls.dispose(); this.character.dispose(); this.audio.dispose(); this.cinematic.dispose(); this.tutorial.dispose(); this.ui.dispose(); this.rails.dispose(); this.buildings.dispose(); this.snow.dispose(this.scene); this.effects.dispose(); this.world.dispose(); this.physics.dispose(); this.models.dispose(); this.renderer.dispose();
     delete window.__gameProbe; delete window.__whiteoutDebug; window.__GAME_READY__ = false;
   }
+}
+
+let launchCreditGrant: number | null | undefined;
+function readLaunchCreditGrant(): number | null {
+  if (launchCreditGrant !== undefined) return launchCreditGrant;
+  const raw = new URLSearchParams(location.search).get("credits");
+  const amount = raw == null || raw.trim() === "" ? Number.NaN : Math.floor(Number(raw));
+  launchCreditGrant = Number.isFinite(amount) && amount >= 0 ? amount : null;
+  if (launchCreditGrant != null) {
+    const params = new URLSearchParams(location.search);
+    params.delete("credits");
+    const query = params.toString();
+    history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+  }
+  return launchCreditGrant;
 }
 
 export function startGame(canvas: HTMLCanvasElement, overlay?: HTMLElement): void {

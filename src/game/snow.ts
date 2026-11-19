@@ -35,6 +35,8 @@ export class SnowField {
   private chunkMass = new Float32Array(this.chunkColumns * this.chunkColumns);
   private chunkCells = new Uint16Array(this.chunkColumns * this.chunkColumns);
   private chunkDirty = new Uint8Array(this.chunkColumns * this.chunkColumns);
+  /** Bumps when a storm burst refills snow, so sweep plans rescan instead of chasing specks. */
+  revision = 0;
   private chunkCellIndices: Int32Array[];
   get cleanupPercent(): number { return THREE.MathUtils.clamp((1 - this.totalRemaining / this.initialTotal) * 100, 0, 100); }
 
@@ -75,7 +77,7 @@ export class SnowField {
       const baseDist = Math.hypot(wx - GAME.baseCenter.x, wz - GAME.baseCenter.z);
       if (baseDist < 8) d *= THREE.MathUtils.smoothstep(baseDist, 3.5, 8);
       for (const zone of this.exclusions) if (Math.hypot(wx - zone.x, wz - zone.z) < zone.r) { d = 0; break; }
-      this.density[i] = d; this.totalRemaining += d; this.writePixel(i, d);
+      this.density[i] = d; if (this.tracked(wx, wz)) this.totalRemaining += d; this.writePixel(i, d);
     }
     this.initialTotal = Math.max(1, this.totalRemaining);
     this.chunkDirty.fill(1); this.texture.needsUpdate = true;
@@ -84,6 +86,14 @@ export class SnowField {
   private writePixel(i: number, d: number): void {
     const v = Math.max(0, Math.min(255, Math.round(d * 255))); const p = i * 4;
     this.pixels[p] = v; this.pixels[p + 1] = v; this.pixels[p + 2] = v; this.pixels[p + 3] = 255;
+  }
+  /** Snow past the movement limit is scenery. It stays visible and never enters the cleanup total. */
+  private tracked(x: number, z: number): boolean {
+    return Math.abs(x) <= GAME.worldLimit && Math.abs(z) <= GAME.worldLimit;
+  }
+  private cellWorld(index: number): { x: number; z: number } {
+    const x = index % this.resolution; const y = Math.floor(index / this.resolution);
+    return { x: (x + 0.5) / this.resolution * this.size - this.size / 2, z: this.size / 2 - (y + 0.5) / this.resolution * this.size };
   }
   private coords(x: number, z: number): { x: number; y: number } {
     return { x: Math.floor((x / this.size + 0.5) * this.resolution), y: Math.floor((0.5 - z / this.size) * this.resolution) };
@@ -95,22 +105,53 @@ export class SnowField {
   }
   heightAt(x: number, z: number): number { const d = this.sample(x, z); return groundHeight(x, z) + 0.025 + (d > 0.1 ? d * 0.78 + 0.025 : 0); }
 
-  clear(x: number, z: number, radius: number, amount: number): number {
+  clear(x: number, z: number, radius: number, amount: number, rateForDensity?: (density: number) => number): number {
     const c = this.coords(x, z); const rr = Math.ceil(radius / this.size * this.resolution) + 1;
     let removed = 0; let changed = false;
     for (let gy = Math.max(0, c.y - rr); gy <= Math.min(this.resolution - 1, c.y + rr); gy++) for (let gx = Math.max(0, c.x - rr); gx <= Math.min(this.resolution - 1, c.x + rr); gx++) {
       const wx = (gx + 0.5) / this.resolution * this.size - this.size / 2;
       const wz = this.size / 2 - (gy + 0.5) / this.resolution * this.size;
-      const dist = Math.hypot(wx - x, wz - z); if (dist > radius) continue;
+      const dist = Math.hypot(wx - x, wz - z); if (dist > radius || !this.tracked(wx, wz)) continue;
       const i = gy * this.resolution + gx; const before = this.density[i]; if (before <= 0) continue;
       const falloff = 0.35 + 0.65 * (1 - dist / radius);
-      const next = Math.max(0, before - amount * falloff); const delta = before - next;
+      const bite = rateForDensity ? rateForDensity(before) : amount;
+      const next = Math.max(0, before - bite * falloff); const delta = before - next;
       if (delta <= 0) continue;
       this.density[i] = next; this.writePixel(i, next); removed += delta; changed = true;
       this.chunkDirty[this.chunkAt(wx, wz)] = 1;
     }
     if (changed) { this.totalRemaining = Math.max(0, this.totalRemaining - removed); this.texture.needsUpdate = true; }
     return removed;
+  }
+
+  /** Test fields. Sets every tracked cell inside the circle to an exact density. */
+  paintDisk(x: number, z: number, radius: number, density: number): number {
+    const value = Math.max(0, Math.min(1, density));
+    const c = this.coords(x, z); const rr = Math.ceil(radius / this.size * this.resolution) + 1;
+    let changed = false;
+    for (let gy = Math.max(0, c.y - rr); gy <= Math.min(this.resolution - 1, c.y + rr); gy++) for (let gx = Math.max(0, c.x - rr); gx <= Math.min(this.resolution - 1, c.x + rr); gx++) {
+      const wx = (gx + 0.5) / this.resolution * this.size - this.size / 2;
+      const wz = this.size / 2 - (gy + 0.5) / this.resolution * this.size;
+      if (Math.hypot(wx - x, wz - z) > radius || !this.tracked(wx, wz)) continue;
+      const i = gy * this.resolution + gx; const before = this.density[i];
+      if (Math.abs(before - value) < 1e-6) continue;
+      this.density[i] = value; this.writePixel(i, value); this.totalRemaining += value - before; changed = true;
+      this.chunkDirty[this.chunkAt(wx, wz)] = 1;
+    }
+    if (changed) { this.totalRemaining = Math.max(0, this.totalRemaining); this.texture.needsUpdate = true; }
+    return this.diskMass(x, z, radius);
+  }
+
+  diskMass(x: number, z: number, radius: number): number {
+    const c = this.coords(x, z); const rr = Math.ceil(radius / this.size * this.resolution) + 1;
+    let mass = 0;
+    for (let gy = Math.max(0, c.y - rr); gy <= Math.min(this.resolution - 1, c.y + rr); gy++) for (let gx = Math.max(0, c.x - rr); gx <= Math.min(this.resolution - 1, c.x + rr); gx++) {
+      const wx = (gx + 0.5) / this.resolution * this.size - this.size / 2;
+      const wz = this.size / 2 - (gy + 0.5) / this.resolution * this.size;
+      if (Math.hypot(wx - x, wz - z) > radius || !this.tracked(wx, wz)) continue;
+      mass += this.density[gy * this.resolution + gx];
+    }
+    return mass;
   }
 
   private protectedAt(x: number, z: number, heaters: CircleZone[]): boolean {
@@ -120,24 +161,43 @@ export class SnowField {
     return false;
   }
 
+  /**
+   * Isolated cleared ground keeps the configured light drift, but that drift
+   * shrinks with the square of the snow that is still left. A working fleet
+   * was stalling near 60% because every storm repainted the whole cleared
+   * district. Cells touching remaining snow stay a full storm front.
+   */
+  private driftScale(): number {
+    if (this.initialTotal <= 0) return 1;
+    const ratio = this.totalRemaining / this.initialTotal;
+    return ratio * ratio;
+  }
+
   stormBurst(heaters: CircleZone[]): number {
     let refilled = 0;
+    const openChance = GAME.stormRegrowChance * this.driftScale();
     for (let gy = 1; gy < this.resolution - 1; gy++) for (let gx = 1; gx < this.resolution - 1; gx++) {
-      const i = gy * this.resolution + gx; const before = this.density[i];
-      if (before > 0.1 || this.random() >= GAME.stormRegrowChance) continue;
       const wx = (gx + 0.5) / this.resolution * this.size - this.size / 2;
       const wz = this.size / 2 - (gy + 0.5) / this.resolution * this.size;
-      if (this.protectedAt(wx, wz, heaters)) continue;
+      if (!this.tracked(wx, wz)) continue;
+      const i = gy * this.resolution + gx; const before = this.density[i];
+      if (before > 0.1) continue;
+      const neighbor = Math.max(this.density[i - 1], this.density[i + 1], this.density[i - this.resolution], this.density[i + this.resolution]);
+      // Open ground gets a light drift that fades as the district is cleared.
+      // A cell touching remaining snow stays a full storm front.
+      const chance = neighbor > 0.2 ? 0.22 : openChance;
+      if (this.random() >= chance || this.protectedAt(wx, wz, heaters)) continue;
       const next = 0.28 + this.random() * 0.42;
       this.density[i] = next; this.writePixel(i, next); this.totalRemaining += next - before; refilled++;
     }
-    if (refilled) { this.chunkDirty.fill(1); this.texture.needsUpdate = true; }
+    if (refilled) { this.revision++; this.chunkDirty.fill(1); this.texture.needsUpdate = true; }
     return refilled;
   }
 
   regrow(dt: number, intensity: number, heaters: CircleZone[], focus?: { x: number; z: number; r: number }): void {
     // Continuous local precipitation is essential: a freshly cleared patch must not stay bare for a whole storm.
     const attempts = Math.max(2, Math.floor(1100 * dt * intensity)); let changed = false;
+    const drift = this.driftScale();
     for (let n = 0; n < attempts; n++) {
       let wx: number; let wz: number;
       if (focus && n % 3 !== 0) {
@@ -147,14 +207,14 @@ export class SnowField {
         wx = (this.random() - 0.5) * this.size; wz = (this.random() - 0.5) * this.size;
       }
       const c = this.coords(wx, wz);
-      if (c.x < 0 || c.y < 0 || c.x >= this.resolution || c.y >= this.resolution || this.protectedAt(wx, wz, heaters)) continue;
+      if (c.x < 0 || c.y < 0 || c.x >= this.resolution || c.y >= this.resolution || !this.tracked(wx, wz) || this.protectedAt(wx, wz, heaters)) continue;
       const i = c.y * this.resolution + c.x; const before = this.density[i]; if (before >= 0.82) continue;
       const neighborAverage = c.x > 0 && c.y > 0 && c.x < this.resolution - 1 && c.y < this.resolution - 1
         ? (this.density[i - 1] + this.density[i + 1] + this.density[i - this.resolution] + this.density[i + this.resolution]) * 0.25
         : before;
       // Grow a coherent thin edge from neighbouring snow instead of isolated bright pixels.
       const coherentBase = Math.max(before, Math.min(0.42, neighborAverage * 0.7));
-      const next = Math.min(0.82, coherentBase + 0.012 * intensity); this.totalRemaining += next - before;
+      const next = Math.min(0.82, coherentBase + 0.012 * intensity * drift); this.totalRemaining += next - before;
       this.density[i] = next; this.writePixel(i, next); changed = true;
       this.chunkDirty[this.chunkAt(wx, wz)] = 1;
     }
@@ -213,9 +273,12 @@ export class SnowField {
   }
   private measureChunk(id: number): void {
     if (!this.chunkDirty[id]) return;
-    const indices = this.chunkCellIndices[id]; let mass = 0;
-    for (const index of indices) mass += this.density[index];
-    this.chunkMass[id] = mass; this.chunkCells[id] = indices.length; this.chunkDirty[id] = 0;
+    const indices = this.chunkCellIndices[id]; let mass = 0; let cells = 0;
+    for (const index of indices) {
+      const point = this.cellWorld(index); if (!this.tracked(point.x, point.z)) continue;
+      mass += this.density[index]; cells++;
+    }
+    this.chunkMass[id] = mass; this.chunkCells[id] = cells; this.chunkDirty[id] = 0;
   }
   chunkView(id: number): ChunkView {
     this.measureChunk(id); const center = this.chunkCenter(id); const col = id % this.chunkColumns; const row = Math.floor(id / this.chunkColumns);
@@ -223,18 +286,31 @@ export class SnowField {
     return { id, name: `${String.fromCharCode(65 + col)}-${String(row + 1).padStart(2, "0")}`, col, row, x: center.x, z: center.z, size: this.chunkSize, remaining: this.chunkMass[id], progress: THREE.MathUtils.clamp(1 - this.chunkMass[id] / full, 0, 1), assigned: false };
   }
   chunkViews(): ChunkView[] { return Array.from({ length: this.chunkColumns * this.chunkColumns }, (_, id) => this.chunkView(id)); }
-  findBestChunk(x: number, z: number, range: number, avoid: number[], fromX = x, fromZ = z): number | null {
-    let best: number | null = null; let bestScore = 0.55;
+  findBestChunk(x: number, z: number, range: number, avoid: number[], fromX = x, fromZ = z, accept?: (id: number) => boolean, near = false): number | null {
+    let best: number | null = null; let bestScore = near ? -1e9 : 0.55;
     for (let id = 0; id < this.chunkMass.length; id++) {
-      if (avoid.includes(id)) continue;
+      if (avoid.includes(id) || (accept && !accept(id))) continue;
       const chunk = this.chunkView(id); if (chunk.remaining < 0.55) continue;
       if (Math.hypot(chunk.x - x, chunk.z - z) > range + this.chunkSize * 0.45) continue;
-      const score = chunk.remaining * 0.065 - Math.hypot(chunk.x - fromX, chunk.z - fromZ) * 0.08;
+      const distance = Math.hypot(chunk.x - fromX, chunk.z - fromZ);
+      // Untouched ground outranks a light storm refill, so the fleet finishes the map
+      // instead of mowing the same docks forever. Supply runs opt out with `near`.
+      const frontier = !near && chunk.progress < 0.45 ? 6 : 0;
+      const score = near ? chunk.remaining * 0.002 - distance : chunk.remaining * 0.04 + frontier - distance * 0.05;
       if (score > bestScore) { bestScore = score; best = id; }
     }
     return best;
   }
-  findChunkTarget(id: number, fromX: number, fromZ: number): { x: number; z: number; density: number } | null {
+  /** True when this circle still holds a chunk that has not already been swept down to storm dust. */
+  hasFreshChunk(x: number, z: number, range: number): boolean {
+    for (let id = 0; id < this.chunkMass.length; id++) {
+      const chunk = this.chunkView(id);
+      if (chunk.remaining < 0.55 || chunk.progress >= 0.45) continue;
+      if (Math.hypot(chunk.x - x, chunk.z - z) <= range + this.chunkSize * 0.45) return true;
+    }
+    return false;
+  }
+  findChunkTarget(id: number, fromX: number, fromZ: number, reject?: (x: number, z: number) => boolean): { x: number; z: number; density: number } | null {
     const center = this.chunkCenter(id); const half = this.chunkSize / 2;
     let best: { x: number; z: number; density: number; score: number } | null = null;
     for (const index of this.chunkCellIndices[id]) {
@@ -242,7 +318,7 @@ export class SnowField {
       if (gx < 1 || gy < 1 || gx >= this.resolution - 1 || gy >= this.resolution - 1) continue;
       const wx = (gx + 0.5) / this.resolution * this.size - this.size / 2;
       const wz = this.size / 2 - (gy + 0.5) / this.resolution * this.size;
-      if (Math.abs(wx - center.x) >= half || Math.abs(wz - center.z) >= half) continue;
+      if (Math.abs(wx - center.x) >= half || Math.abs(wz - center.z) >= half || !this.tracked(wx, wz) || reject?.(wx, wz)) continue;
       const density = this.density[index]; if (density < 0.065) continue;
       let neighbors = 0; for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) neighbors += this.density[(gy + oy) * this.resolution + gx + ox];
       const score = density * 2 + neighbors * 0.45 - Math.hypot(wx - fromX, wz - fromZ) * 0.025;
@@ -257,7 +333,7 @@ export class SnowField {
     this.totalRemaining = 0;
     for (let i = 0; i < values.length; i++) {
       const v = THREE.MathUtils.clamp(Number(values[i]) || 0, 0, 1);
-      this.density[i] = v; this.totalRemaining += v; this.writePixel(i, v);
+      this.density[i] = v; const point = this.cellWorld(i); if (this.tracked(point.x, point.z)) this.totalRemaining += v; this.writePixel(i, v);
     }
     this.chunkDirty.fill(1); this.texture.needsUpdate = true;
   }

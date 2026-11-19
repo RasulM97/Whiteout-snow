@@ -30,4 +30,10 @@
 - PathFinding.js (`pathfinding`) — MIT؛ جست‌وجوی A* برای مسیر ربات‌ها روی شبکه‌ی مانع‌دار، همراه با هموارسازی مسیر اختصاصی پروژه
 - Graphify (`graphifyy`) — MIT؛ فقط ابزار توسعه برای نمایه‌سازی و پرس‌وجوی گراف کد. کد یا وابستگی اجرایی آن در بازی گنجانده نشده است.
 
-رابط از پشته‌ی فونت استاندارد سیستم استفاده می‌کند و فونت خارجی دانلود نمی‌شود: Segoe UI، Noto Sans Arabic، Vazirmatn، Tahoma، Noto Sans SC و Microsoft YaHei بسته به زبان و سیستم کاربر.
+فونت‌های بازی محلی و داخل `public/fonts` هستند و هنگام بازی از شبکه بار نمی‌شوند:
+
+- Inter 4.1 (`InterVariable.woff2`) — SIL Open Font License 1.1 — https://github.com/rsms/inter
+- Vazirmatn 33.003 (`Vazirmatn.woff2`) — SIL Open Font License 1.1 — https://github.com/rastikerdar/vazirmatn
+- Noto Sans SC، زیرمجموعهٔ متغیر (`NotoSansSC.woff2`) — SIL Open Font License 1.1 — https://github.com/google/fonts/tree/main/ofl/notosanssc
+
+متن مجوز هر قلم کنار همان فایل است. جزئیات در `public/fonts/NOTICES.md` آمده است.

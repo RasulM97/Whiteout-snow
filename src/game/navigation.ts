@@ -50,6 +50,11 @@ export class RobotNavigation {
     }
     return null;
   }
+  blocked(x: number, z: number): boolean {
+    if (!this.matrix.length) return false;
+    const cell = this.toCell(x, z);
+    return this.matrix[cell.row]?.[cell.col] !== 0;
+  }
   private walkable(x: number, z: number): boolean {
     const c = this.toCell(x, z); return this.matrix[c.row]?.[c.col] === 0;
   }

@@ -251,7 +251,8 @@ try {
         const was = prev[r.slot];
         const moved = was ? Math.hypot(r.x - was.x, r.z - was.z) : 1;
         const delta = was ? r.carry - was.carry : 0;
-        const goal = r.carry > 0.3 ? { x: 16.25, z: 10 } : (r.targetX == null ? null : { x: r.targetX, z: r.targetZ });
+        // A full dock sends the sweeper back out with its tank. Only an actual return is heading for the dock.
+        const goal = (r.mode === "return" || r.mode === "unload") && r.carry > 0.3 ? { x: 16.25, z: 10 } : (r.targetX == null ? null : { x: r.targetX, z: r.targetZ });
         const goalChanged = !goal || !was?.goal || Math.hypot(goal.x - was.goal.x, goal.z - was.goal.z) >= 1.5;
         if (!hist[r.slot] || goalChanged) hist[r.slot] = [];
         const distNow = goal ? Math.hypot(r.x - goal.x, r.z - goal.z) : null;

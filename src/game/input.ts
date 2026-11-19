@@ -13,7 +13,7 @@ export class Input {
   private clicks: PointerClick[] = [];
   private orbitPointer: number | null = null; private orbitLastX = 0;
   mode: "play" | "build" = "play"; cameraRotate = false;
-  zoomDelta = 0; orbitDelta = 0;
+  zoomDelta = 0; orbitDelta = 0; pointerDown = false;
 
   constructor(private canvas: HTMLCanvasElement) {
     const on = <T extends Event>(el: Window | Document | HTMLElement, type: string, fn: (e: T) => void, opts?: AddEventListenerOptions) => {
@@ -42,11 +42,11 @@ export class Input {
       if (this.cameraRotate && (e.button === 2 || (e.pointerType === "touch" && !e.isPrimary))) {
         this.orbitPointer = e.pointerId; this.orbitLastX = e.clientX; canvas.setPointerCapture(e.pointerId); e.preventDefault(); return;
       }
-      this.setPointer(e); this.pointerActive = true;
+      this.setPointer(e); this.pointerActive = true; this.pointerDown = true;
       if (this.mode === "build" || e.button === 2) this.clicks.push({ x: this.pointerX, y: this.pointerY, button: e.button });
       else if (e.pointerType !== "touch" && e.button === 0) this.mouseClear = true;
     });
-    const endOrbit = (e: PointerEvent) => { if (this.orbitPointer === e.pointerId) this.orbitPointer = null; };
+    const endOrbit = (e: PointerEvent) => { if (this.orbitPointer === e.pointerId) this.orbitPointer = null; this.pointerDown = false; };
     on<PointerEvent>(window, "pointerup", (e) => { if (e.button === 0) this.mouseClear = false; endOrbit(e); });
     on<PointerEvent>(window, "pointercancel", endOrbit);
     on(canvas, "pointerleave", () => { this.pointerActive = false; this.mouseClear = false; });
@@ -98,7 +98,7 @@ export class Input {
     this.moveX = Math.max(-1, Math.min(1, x)); this.moveZ = Math.max(-1, Math.min(1, z));
   }
   resetAll(): void {
-    this.held.clear(); this.actions.clear(); this.mouseClear = false; this.touchClear = false; this.clicks.length = 0; this.orbitPointer = null; this.orbitDelta = 0;
+    this.held.clear(); this.actions.clear(); this.mouseClear = false; this.touchClear = false; this.clicks.length = 0; this.orbitPointer = null; this.orbitDelta = 0; this.pointerDown = false;
     this.moveX = 0; this.moveZ = 0; this.stickPointer = null;
     const knob = document.getElementById("move-knob"); if (knob) knob.style.transform = "translate(0px, 0px)";
   }

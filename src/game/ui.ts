@@ -1,14 +1,17 @@
+import { GAME } from "./config";
 import { BUILDINGS, TOOLS, TOOL_UPGRADES, UPGRADES, toolRepairCost, type BuildingType, type GameSnapshot, type GameState, type Language, type PausePanel, type RobotZoneMode, type SettingsView, type ToolId, type UpgradeId } from "./types";
 import { locale, translate } from "./i18n";
-import { toolTierStats } from "./tool-progression";
+import { toolClearRate, toolTierStats } from "./tool-progression";
 
 export interface UIHandlers {
   start: () => void; continue: () => void; resume: () => void; restart: () => void; checkpoint: () => void; pause: () => void;
   openUpgrades: () => void; openSettings: () => void; openRobots: () => void; openLog: () => void; closePanel: () => void; mute: () => void; tutorial: () => void;
   scan: () => void; interact: () => void; buyUpgrade: (id: UpgradeId) => void; buyBattery: () => void;
   buyTool: (id: ToolId) => void; selectTool: (id: ToolId) => void; repairTool: (id: ToolId) => void;
-  selectBuild: (type: BuildingType) => void; selectRail: () => void; upgradeBuilding: () => void;
+  selectBuild: (type: BuildingType) => void; selectRail: () => void; confirmRail: () => void; cancelRail: () => void; removeRailPoint: () => void; upgradeBuilding: () => void;
+  armDraw: () => void; editRail: () => void; extendRail: () => void; deleteRail: () => void; setJunctionPolicy: (policy: "auto" | "priority" | "ratio", ratio?: number) => void;
   moveBuilding: () => void; demolishBuilding: () => void; repairBuilding: () => void;
+  beginWorkArea: () => void; confirmWorkArea: () => void; cancelWorkArea: () => void; clearWorkArea: () => void;
   buyExtraRobot: (buildingId: number) => void; robotZoneMode: (buildingId: number, slot: number, mode: RobotZoneMode, chunkId?: number) => void;
   robotRepairAllowed: (buildingId: number, slot: number, allowed: boolean) => void;
   setting: <K extends keyof SettingsView>(key: K, value: SettingsView[K]) => void;
@@ -31,7 +34,12 @@ function shopArt(id: ToolId | UpgradeId | "battery"): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 96"><rect width="120" height="96" rx="18" fill="#102f39"/><circle cx="92" cy="18" r="27" fill="#173f49"/>${drawings[id]}</svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
-function timeText(seconds: number): string { const m = Math.floor(seconds / 60); const s = Math.floor(seconds % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
+function timeText(seconds: number): string {
+  const lang = document.documentElement.lang || "en";
+  const loc = lang === "fa" ? "fa-IR" : lang.startsWith("zh") ? "zh-CN" : "en-US";
+  const m = Math.floor(seconds / 60); const s = Math.floor(seconds % 60);
+  return `${new Intl.NumberFormat(loc).format(m)}:${new Intl.NumberFormat(loc, { minimumIntegerDigits: 2 }).format(s)}`;
+}
 
 export class GameUI {
   private snapshot: GameSnapshot | null = null; private toastTimer = 0; private language: Language = "en";
@@ -50,6 +58,7 @@ export class GameUI {
         </section>
         <section class="resource-card glass">
           <div class="credit-line"><span data-i18n="hud.credits"></span><strong id="credits-text"></strong></div>
+          <div class="resource-line"><span data-i18n="hud.heat"></span><strong id="heat-text"></strong></div><div class="meter"><i id="heat-bar" class="heat-fill"></i></div>
           <div class="sales-rate"><span data-i18n="hud.salesMinute"></span><b id="sales-rate">0</b></div>
           <div class="cleanup-live"><div><span data-i18n="hud.cleanup"></span><b id="cleanup-text">0.0%</b></div><div class="meter"><i id="cleanup-bar"></i></div></div>
           <div class="inventory-grid">
@@ -60,12 +69,11 @@ export class GameUI {
           <div class="resource-line"><span data-i18n="hud.load"></span><strong id="load-text"></strong></div><div class="meter"><i id="load-bar" class="load-fill"></i></div>
           <div id="tank-status" class="tank-status"></div>
           <div class="wayfinding"><span data-i18n="hud.saleWhere"></span><span data-i18n="hud.shopWhere"></span></div>
-          <div class="resource-line"><span data-i18n="hud.heat"></span><strong id="heat-text"></strong></div><div class="meter"><i id="heat-bar" class="heat-fill"></i></div>
           <div class="resource-line power-label"><span data-i18n="hud.power"></span><strong id="power-text"></strong></div><div class="meter"><i id="power-bar" class="power-fill"></i></div><button id="power-help-btn" class="power-note" data-i18n="power.short"></button>
         </section>
         <div class="tool-chip glass"><span class="key">1–5</span><div><small data-i18n="hud.tool"></small><b id="tool-name"></b><div class="tool-health-line"><span data-i18n="hud.toolHealth"></span><strong id="tool-health-text"></strong></div><div class="meter"><i id="tool-health-bar"></i></div></div></div>
         <div id="scanner-chip" class="scanner-chip glass"><span class="key">Q</span><span id="signal-sector" class="signal-sector">↑</span><div><span id="scanner-text"></span><small id="signal-text"></small><div class="signal-meter"><i id="signal-bar"></i></div></div><button id="hud-battery-btn" class="battery-btn" data-i18n="shop.addBattery"></button><button id="relay-help-btn" class="battery-btn" data-i18n="relay.help"></button></div>
-        <section id="relay-guide" class="radar-guide glass hidden"><div class="radar-guide-head"><b data-i18n="relay.guideTitle"></b><button id="close-relay-help" aria-label="Close">×</button></div><p data-i18n="relay.guideCopy"></p><div id="relay-list" class="relay-list"></div><div class="power-explainer"><b data-i18n="power.explainTitle"></b><p data-i18n="power.explain"></p><small data-i18n="power.explainRanges"></small></div></section>
+        <section id="relay-guide" class="radar-guide glass hidden"><div class="radar-guide-head"><b data-i18n="relay.guideTitle"></b><button id="close-relay-help" data-i18n-aria="a11y.close" aria-label="Close">×</button></div><p data-i18n="relay.guideCopy"></p><div id="relay-list" class="relay-list"></div><div class="power-explainer"><b data-i18n="power.explainTitle"></b><p data-i18n="power.explain"></p><small data-i18n="power.explainRanges"></small></div></section>
         <div id="robot-alert" class="robot-alert glass hidden"><span>❄</span><b id="robot-alert-text"></b></div>
         <section id="building-card" class="building-card glass hidden">
           <div class="building-card-head"><b id="building-name"></b><span id="building-level"></span></div>
@@ -77,6 +85,8 @@ export class GameUI {
             <div id="building-health-row" class="buffer-row hidden"><div class="buffer-label"><span data-i18n="hud.robotHealth"></span><b id="building-robot-health"></b></div><div class="meter tank-meter"><i id="building-robot-health-bar"></i></div></div>
             <div id="building-input-row" class="buffer-row"><div class="buffer-label"><span data-i18n="build.input"></span><b id="building-input"></b></div><div class="meter tank-meter"><i id="building-input-bar"></i></div></div>
             <div id="building-output-row" class="buffer-row"><div class="buffer-label"><span data-i18n="build.dockTank"></span><b id="building-output"></b></div><div class="meter tank-meter"><i id="building-output-bar"></i></div></div>
+            <div id="building-cycle-row" class="buffer-row hidden"><div class="buffer-label"><span data-i18n="build.cycle"></span><b id="building-cycle"></b></div><div class="meter tank-meter"><i id="building-cycle-bar"></i></div></div>
+            <div id="building-shipping" class="building-no-storage hidden"></div>
             <div id="building-no-storage" class="building-no-storage hidden" data-i18n="build.noStorage"></div>
           </div>
           <div class="building-power-grid">
@@ -85,11 +95,13 @@ export class GameUI {
             <span data-i18n="build.efficiency"></span><b id="building-efficiency"></b>
             <span id="building-cable-label" data-i18n="build.cable"></span><b id="building-cable"></b>
           </div>
+          <div id="work-area-actions" class="building-actions hidden"><button id="work-area-set" class="small-action" type="button"></button><button id="work-area-auto" class="small-action" type="button"></button></div>
+          <p id="work-area-note" class="building-desc hidden"></p>
           <div class="building-actions"><button id="repair-building-btn" class="small-action repair-action hidden"></button><button id="upgrade-building-btn" class="small-action"></button><button id="move-building-btn" class="small-action" data-i18n="action.moveBuilding"></button><button id="demolish-building-btn" class="small-action danger-action" data-i18n="action.demolish"></button></div>
         </section>
       </div>
       <div class="top-actions">
-        <button id="mute-btn" class="icon-btn sound-btn" aria-label="Audio"><span id="mute-icon" aria-hidden="true">🔊</span><span data-i18n="action.sound"></span></button>
+        <button id="mute-btn" class="icon-btn sound-btn" data-i18n-aria="a11y.audio" aria-label="Audio"><span id="mute-icon" aria-hidden="true">🔊</span><span data-i18n="action.sound"></span></button>
         <button id="shop-btn" class="icon-btn hidden" data-i18n="action.tools"></button>
         <button id="robots-btn" class="icon-btn hidden" data-i18n="action.robots"></button>
         <button id="log-btn" class="icon-btn hidden" data-i18n="action.log"></button>
@@ -104,13 +116,21 @@ export class GameUI {
       <div id="toast" class="toast"></div>
       <div id="prompt" class="prompt hidden"><span class="key">E</span><span id="prompt-text"></span></div>
       <div id="build-hint" class="build-hint hidden"></div>
-      <nav id="build-dock" class="build-dock glass hidden" aria-label="Construction">
+      <div id="work-area-bar" class="rail-editor glass hidden"><p id="work-area-hint"></p><div class="rail-editor-actions"><button id="work-area-confirm" class="primary-btn" type="button"></button><button id="work-area-cancel" class="secondary-btn" type="button"></button></div></div>
+      <div id="rail-editor" class="rail-editor glass hidden">
+        <p id="rail-editor-copy"></p>
+        <div class="rail-editor-actions"><button id="rail-confirm" class="primary-btn"></button><button id="rail-remove" class="secondary-btn"></button><button id="rail-cancel" class="secondary-btn"></button></div>
+      </div>
+      <div id="rail-net" class="rail-net hidden"><button id="rail-draw" type="button"></button></div>
+      <div id="rail-context" class="rail-context hidden"><button id="rail-edit" type="button"></button><button id="rail-extend" type="button"></button><button id="rail-delete" type="button"></button></div>
+      <div id="junction-panel" class="junction-panel glass hidden"><p id="junction-copy"></p><div class="rail-editor-actions"><button id="junction-auto" type="button"></button><button id="junction-priority" type="button"></button><button id="junction-ratio" type="button"></button></div><label id="junction-ratio-label"><span id="junction-ratio-name"></span><input id="junction-ratio-slider" type="range" min="0" max="100" step="5"></label></div>
+      <nav id="build-dock" class="build-dock glass hidden" data-i18n-aria="a11y.construction" aria-label="Construction">
         ${buildingOrder.map((id) => `<button class="build-btn" data-build="${id}"><span class="build-icon">${icons[id]}</span><span class="build-copy"><b data-building-name="${id}"></b><small data-building-cost="${id}"></small></span></button>`).join("")}
-        <button class="build-btn rail-btn" data-build="rail"><span class="build-icon">${icons.rail}</span><span class="build-copy"><b data-i18n="action.rail"></b><small>2.2 / m</small></span></button>
+        <button class="build-btn rail-btn" data-build="rail"><span class="build-icon">${icons.rail}</span><span class="build-copy"><b data-i18n="action.rail"></b><small data-i18n="rail.perMeter">2.2 / m</small></span></button>
       </nav>
-      <div id="desktop-help" class="desktop-help hidden"><span><b>WASD</b> <i data-i18n="controls.move"></i></span><span><b>Shift</b> <i data-i18n="controls.sprint"></i></span><span><b>Space</b> <i data-i18n="controls.clear"></i></span><span><b>Q</b> <i data-i18n="controls.scan"></i></span><span><b>E</b> <i data-i18n="controls.interact"></i></span><span><b>U</b> <i data-i18n="controls.upgrade"></i></span><span><b>Ctrl</b> <i data-i18n="controls.details"></i></span></div>
+      <div id="desktop-help" class="desktop-help hidden"><span><b>WASD</b> <i data-i18n="controls.move"></i></span><span><b>Shift</b> <i data-i18n="controls.sprint"></i></span><span><b>Space</b> <i data-i18n="controls.clear"></i></span><span><b>Q</b> <i data-i18n="controls.scan"></i></span><span><b>E</b> <i data-i18n="controls.interact"></i></span><span><b>U</b> <i data-i18n="controls.upgrade"></i></span><span id="ctrl-hint"><b>Ctrl</b> <i data-i18n="controls.details"></i></span></div>
       <div id="touch-controls" class="touch-controls hidden">
-        <div id="move-stick" class="move-stick" aria-label="Move"><div class="stick-arrows">+</div><div id="move-knob" class="move-knob"></div></div>
+        <div id="move-stick" class="move-stick" data-i18n-aria="a11y.move" aria-label="Move"><div class="stick-arrows">+</div><div id="move-knob" class="move-knob"></div></div>
         <div class="touch-actions"><button id="touch-scan" class="touch-small" data-i18n="controls.scan"></button><button id="touch-interact" class="touch-small" data-i18n="controls.interact"></button><button id="touch-clear" class="touch-clear" data-i18n="controls.clear"></button></div>
       </div>
       <section id="title-screen" class="screen title-screen">
@@ -147,11 +167,16 @@ export class GameUI {
     byId("log-btn").onclick = handlers.openLog; byId("pause-log-btn").onclick = handlers.openLog; byId("close-log-btn").onclick = handlers.closePanel;
     byId("pause-settings-btn").onclick = handlers.openSettings; byId("tutorial-pause-btn").onclick = handlers.tutorial; byId("close-upgrades-btn").onclick = handlers.closePanel; byId("close-settings-btn").onclick = handlers.closePanel; byId("close-robots-btn").onclick = handlers.closePanel;
     byId("touch-scan").onclick = handlers.scan; byId("touch-interact").onclick = handlers.interact; byId("upgrade-building-btn").onclick = handlers.upgradeBuilding; byId("repair-building-btn").onclick = handlers.repairBuilding;
+    byId("work-area-set").onclick = handlers.beginWorkArea; byId("work-area-auto").onclick = handlers.clearWorkArea; byId("work-area-confirm").onclick = handlers.confirmWorkArea; byId("work-area-cancel").onclick = handlers.cancelWorkArea;
     byId("hud-battery-btn").onclick = handlers.buyBattery;
     const toggleRelayGuide = () => byId("relay-guide").classList.toggle("hidden");
     byId("relay-help-btn").onclick = toggleRelayGuide; byId("relay-top-btn").onclick = toggleRelayGuide; byId("power-help-btn").onclick = toggleRelayGuide;
     byId("close-relay-help").onclick = () => byId("relay-guide").classList.add("hidden");
     byId("move-building-btn").onclick = handlers.moveBuilding; byId("demolish-building-btn").onclick = handlers.demolishBuilding;
+    byId("rail-confirm").onclick = handlers.confirmRail; byId("rail-cancel").onclick = handlers.cancelRail; byId("rail-remove").onclick = handlers.removeRailPoint;
+    byId("rail-draw").onclick = () => handlers.armDraw(); byId("rail-edit").onclick = () => handlers.editRail(); byId("rail-extend").onclick = () => handlers.extendRail(); byId("rail-delete").onclick = () => handlers.deleteRail();
+    byId("junction-auto").onclick = () => handlers.setJunctionPolicy("auto"); byId("junction-priority").onclick = () => handlers.setJunctionPolicy("priority"); byId("junction-ratio").onclick = () => handlers.setJunctionPolicy("ratio");
+    byId<HTMLInputElement>("junction-ratio-slider").oninput = (event) => handlers.setJunctionPolicy("ratio", Number((event.target as HTMLInputElement).value));
     document.querySelectorAll<HTMLButtonElement>("[data-build]").forEach((button) => button.onclick = () => {
       const value = button.dataset.build!; if (value === "rail") handlers.selectRail(); else handlers.selectBuild(value as BuildingType);
     });
@@ -171,8 +196,50 @@ export class GameUI {
     byId<HTMLSelectElement>("set-scale").onchange = (e) => handlers.setting("uiScale", Number((e.target as HTMLSelectElement).value));
   }
 
-  private t(key: string): string { return translate(this.language, key); }
+  private refreshRailEditor(s: GameSnapshot): void {
+    const bar = byId("rail-editor"); const editor = s.railEditor;
+    if (!editor || s.state !== "playing") { bar.classList.add("hidden"); return; }
+    bar.classList.remove("hidden"); bar.classList.toggle("invalid", !editor.valid);
+    const kind = this.t(editor.kind === "raw" ? "hud.raw" : editor.kind === "ice" ? "hud.ice" : "hud.purified");
+    const state = editor.blocked ? this.t("rail.blocked") : editor.valid ? this.t(editor.network ? "rail.netReady" : "rail.preview") : this.t("toast.noCredits");
+    byId("rail-editor-copy").textContent = `${this.t("rail.source")}: ${editor.sourceName} → ${this.t("rail.destination")}: ${editor.destinationName} · ${this.t("rail.cargo")}: ${kind} · ${this.t("rail.cost")}: ${this.fmt(editor.cost)} ◈${editor.extra > 0 ? ` · ${this.t("rail.extra")}: ${this.fmt(editor.extra)} ◈` : ""} · ${state}`;
+    const confirm = byId<HTMLButtonElement>("rail-confirm"); confirm.textContent = this.t("rail.confirm"); confirm.disabled = !editor.valid;
+    const remove = byId<HTMLButtonElement>("rail-remove"); remove.textContent = this.t("rail.remove"); remove.disabled = editor.network || editor.selected === null;
+    byId<HTMLButtonElement>("rail-cancel").textContent = this.t("rail.cancel");
+  }
+  private refreshNetwork(s: GameSnapshot): void {
+    const bar = byId("rail-net");
+    bar.classList.toggle("hidden", !s.railTools || s.state !== "playing");
+    byId("rail-draw").textContent = this.t("rail.draw");
+    const menu = byId("rail-context");
+    const selected = s.railSelection;
+    menu.classList.toggle("hidden", !selected || s.state !== "playing");
+    if (selected) {
+      byId("rail-edit").textContent = this.t("rail.edit");
+      byId("rail-extend").textContent = this.t("rail.extend");
+      byId("rail-delete").textContent = this.t("rail.delete");
+      byId<HTMLButtonElement>("rail-edit").disabled = selected.busy;
+      byId<HTMLButtonElement>("rail-delete").disabled = selected.busy;
+    }
+    const panel = byId("junction-panel"); const junction = s.junction;
+    if (!junction || s.state !== "playing") { panel.classList.add("hidden"); return; }
+    panel.classList.remove("hidden");
+    const name = this.t(junction.kind === "merge" ? "rail.merge" : junction.kind === "split" ? "rail.split" : "rail.cross");
+    const quiet = junction.backlog <= 0.05 && junction.sentA + junction.sentB <= 0.05;
+    const wait = junction.blocked ? ` · ${this.t("rail.netWait")}` : "";
+    byId("junction-copy").textContent = quiet
+      ? `${name} · ${junction.destA || "—"} / ${junction.destB || "—"}`
+      : `${name} · ${this.t("rail.netFlow")} ${this.amount(junction.sentA)} / ${this.amount(junction.sentB)} · ${junction.destA || "—"} / ${junction.destB || "—"} · ${this.t("rail.netBacklog")} ${this.amount(junction.backlog)}${wait}`;
+    const policies = junction.kind === "split";
+    for (const id of ["junction-auto", "junction-priority", "junction-ratio", "junction-ratio-slider", "junction-ratio-name"]) byId(id).classList.toggle("hidden", !policies);
+    byId("junction-auto").textContent = this.t("rail.netAuto"); byId("junction-priority").textContent = this.t("rail.netPriority"); byId("junction-ratio").textContent = this.t("rail.netRatio");
+    const slider = byId<HTMLInputElement>("junction-ratio-slider"); slider.value = String(junction.ratio); slider.disabled = !policies;
+    byId("junction-ratio-name").textContent = `${this.percent(junction.ratio)} → ${junction.destA || "—"}`;
+  }
+  private t(key: string, vars?: Record<string, string | number>): string { return translate(this.language, key, vars); }
+  private ltr(value: string): string { return `\u2066${value}\u2069`; }
   private fmt(value: number): string { return new Intl.NumberFormat(locale(this.language)).format(Math.floor(value + 0.0001)); }
+  private percent(value: number, digits = 0): string { return new Intl.NumberFormat(locale(this.language), { style: "percent", maximumFractionDigits: digits }).format(value / 100); }
   private amount(value: number): string { return new Intl.NumberFormat(locale(this.language), { maximumFractionDigits: 1 }).format(Math.abs(value) < 0.05 ? 0 : value); }
   private area(value: number): string { return new Intl.NumberFormat(locale(this.language), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value); }
   private makeShop(): void {
@@ -199,6 +266,8 @@ export class GameUI {
     this.language = language; document.documentElement.lang = language === "zh" ? "zh-CN" : language; document.documentElement.dir = language === "fa" ? "rtl" : "ltr";
     this.root.dataset.language = language;
     this.root.querySelectorAll<HTMLElement>("[data-i18n]").forEach((el) => { el.textContent = this.t(el.dataset.i18n!); });
+    this.root.querySelectorAll<HTMLElement>("[data-i18n-aria]").forEach((el) => el.setAttribute("aria-label", this.t(el.dataset.i18nAria!)));
+    document.querySelector("#game-canvas")?.setAttribute("aria-label", this.t("a11y.canvas"));
     for (const type of buildingOrder) {
       const name = document.querySelector(`[data-building-name="${type}"]`); if (name) name.textContent = this.t(`building.${type}.name`);
       const button = document.querySelector<HTMLButtonElement>(`[data-build="${type}"]`);
@@ -239,44 +308,53 @@ export class GameUI {
     if (state === "paused" && panel === "log" && this.snapshot) this.refreshLog(this.snapshot);
   }
 
-  setDetails(expanded: boolean): void { this.root.classList.toggle("details-expanded", expanded); }
+  setDetails(expanded: boolean): void {
+    this.root.classList.toggle("details-expanded", expanded);
+    // Tall layouts already show the quest, route and tank text. The hold key
+    // only has a visible effect on the short landscape HUD, so the hint follows that.
+    const compact = window.matchMedia("(max-height: 540px) and (orientation: landscape)").matches;
+    byId("ctrl-hint").classList.toggle("hidden", !compact);
+  }
 
   update(s: GameSnapshot): void {
     if (s.language !== this.language) this.applyLanguage(s.language);
     this.snapshot = s;
     byId("credits-text").textContent = this.fmt(s.credits);
     byId("sales-rate").textContent = `${this.fmt(s.salesPerMinute)}/min`;
-    byId("cleanup-text").textContent = `${this.amount(s.cleanupPercent)}%`; byId("cleanup-bar").style.width = `${Math.min(100, s.cleanupPercent)}%`;
+    byId("cleanup-text").textContent = this.percent(s.cleanupPercent, 1); byId("cleanup-bar").style.width = `${Math.min(100, s.cleanupPercent)}%`;
     byId("raw-text").textContent = this.amount(s.raw); byId("pure-text").textContent = this.amount(s.purified); byId("ice-text").textContent = this.amount(s.ice);
     byId("load-text").textContent = `${this.amount(s.load)} / ${this.amount(s.capacity)}`; byId("load-bar").style.width = `${Math.min(100, s.load / s.capacity * 100)}%`;
     const tankStatus = byId("tank-status"); tankStatus.textContent = this.t(s.tankReady ? "hud.readySale" : "hud.fillSale"); tankStatus.classList.toggle("ready", s.tankReady);
     tankStatus.title = this.t("hud.cargoHelp");
-    byId("objective-text").textContent = `${this.t(s.objective.key)} · ${this.fmt(s.objective.distance)}m`;
+    byId("objective-text").textContent = `${this.t(s.objective.key)} · ${this.t("unit.distance", { n: this.fmt(s.objective.distance) })}`;
     this.root.dataset.storm = s.stormPhase;
     const eta = Math.max(0, s.stormEta);
     byId("storm-eta").textContent = s.stormPhase === "storm"
-      ? `${this.t(s.severeStorm ? "storm.severe" : "storm.active")} · ${Math.ceil(s.stormTimer)} ${this.t("storm.seconds")}`
-      : `${this.t("storm.approx")} ${timeText(eta)}`;
+      ? `${this.t(s.severeStorm ? "storm.severe" : "storm.active")} · ${this.t("unit.seconds", { n: this.fmt(Math.ceil(s.stormTimer)) })}`
+      : s.galeLive
+        ? `${this.t("storm.forecastGale")} · ${this.t("unit.seconds", { n: this.fmt(Math.ceil(eta)) })}${s.stormCycle <= 1 ? ` · ${this.t("storm.severe")}` : ""}`
+        : `${this.t("storm.approx")} ${this.ltr(timeText(eta))}`;
     byId("storm-forecast-bar").style.width = `${s.stormPhase === "storm" ? 100 : Math.max(2, Math.min(100, (1 - eta / 145) * 100))}%`;
     byId("storm-forecast").classList.toggle("severe", s.severeStorm);
     byId("storm-forecast").title = `${this.t("storm.severe")}: ${this.t("storm.approx")} ${this.fmt(s.stormCount)} / ${this.fmt(s.stormCount + s.stormCycle)}`;
-    byId("heat-text").textContent = `${this.fmt(Math.ceil(s.heat))}%`; byId("heat-bar").style.width = `${s.heat}%`; byId("heat-bar").classList.toggle("danger", s.heat < 28);
-    byId("power-text").textContent = `${this.fmt(Math.floor(s.power))}%`; byId("power-bar").style.width = `${s.power}%`;
+    byId("heat-text").textContent = this.percent(Math.ceil(s.heat)); byId("heat-bar").style.width = `${s.heat}%`; byId("heat-bar").classList.toggle("danger", s.heat < 28);
+    byId("power-text").textContent = this.percent(Math.floor(s.power)); byId("power-bar").style.width = `${s.power}%`;
     byId("quest-index").textContent = `${this.fmt(Math.min(s.quest.index + 1, s.quest.total))} / ${this.fmt(s.quest.total)}`;
     byId("quest-title").textContent = this.t(`quest.${s.quest.index}.title`);
     const finalQuest = s.quest.index === 9;
     this.root.querySelector(".quest-card")?.classList.toggle("final-quest", finalQuest);
     byId("quest-desc").textContent = this.t(`quest.${s.quest.index}.desc`) + (finalQuest
-      ? `\n${s.cleanupCertified ? "✓" : "○"} ${this.t("hud.cleanup")}: ${s.cleanupCertified ? this.t("hud.certified") : `${this.amount(s.cleanupPercent)}% / ${this.amount(98)}%`}\n${s.cores >= 3 ? "✓" : "○"} ${this.t("hud.clues")}: ${this.fmt(s.cores)} / ${this.fmt(3)}\n${s.power >= 99.99 ? "✓" : "○"} ${this.t("hud.power")}: ${this.fmt(Math.floor(s.power))}% / ${this.amount(100)}%`
+      ? `\n${s.cleanupCertified ? "✓" : "○"} ${this.t("hud.cleanup")}: ${s.cleanupCertified ? this.t("hud.certified") : this.ltr(`${this.percent(s.cleanupPercent, 1)} / ${this.percent(GAME.clearanceGoal)}`)}\n${s.cores >= 3 ? "✓" : "○"} ${this.t("hud.clues")}: ${this.ltr(`${this.fmt(s.cores)} / ${this.fmt(3)}`)}\n${s.power >= 99.99 ? "✓" : "○"} ${this.t("hud.power")}: ${this.ltr(`${this.percent(Math.floor(s.power))} / ${this.percent(100)}`)}`
       : "");
     byId("quest-progress").textContent = `${this.amount(s.quest.progress)} / ${this.amount(s.quest.target)}`; byId("quest-reward").textContent = s.quest.reward ? `+${this.fmt(s.quest.reward)}` : "";
     byId("quest-bar").style.width = `${Math.min(100, s.quest.progress / s.quest.target * 100)}%`;
     byId("core-pips").innerHTML = s.coreViews.map((c) => `<i class="${c.recovered ? "found" : c.scanned ? "scanned" : ""}"></i>`).join("");
-    byId("tool-name").textContent = this.t(`tool.${s.selectedTool}.name`);
-    const selectedHealth = s.toolHealth[s.selectedTool]; byId("tool-health-text").textContent = `${this.amount(selectedHealth)}%`;
+    const toolName = byId("tool-name"); toolName.textContent = this.t(`tool.${s.selectedTool}.name`); toolName.title = this.t(`tool.${s.selectedTool}.desc`);
+    const selectedHealth = s.toolHealth[s.selectedTool]; byId("tool-health-text").textContent = this.percent(selectedHealth);
     byId("tool-health-bar").style.width = `${selectedHealth}%`; byId("tool-health-bar").classList.toggle("danger", selectedHealth < 25);
     const scannerReady = s.scannerCooldown <= 0 && s.radarCharges > 0;
-    byId("scanner-text").textContent = `${this.t("hud.charges")} ${this.fmt(s.radarCharges)} / ${this.fmt(s.radarMaxCharges)} · ${s.scannerCooldown > 0 ? `${Math.ceil(s.scannerCooldown)}s` : `${this.fmt(s.scannerRadius)}m`}`;
+    const scannerMeasure = s.scannerCooldown > 0 ? this.t("unit.seconds", { n: this.fmt(Math.ceil(s.scannerCooldown)) }) : this.t("unit.distance", { n: this.fmt(s.scannerRadius) });
+    byId("scanner-text").textContent = `${this.t("hud.charges")} ${this.ltr(`${this.fmt(s.radarCharges)} / ${this.fmt(s.radarMaxCharges)}`)} · ${scannerMeasure}`;
     byId("scanner-chip").classList.toggle("cooldown", !scannerReady); byId("touch-scan").classList.toggle("disabled", !scannerReady);
     const batteryText = `${this.t("shop.addBattery")} · ${this.fmt(s.radarBatteryCost)} ◈`;
     byId("hud-battery-btn").textContent = batteryText; byId<HTMLButtonElement>("hud-battery-btn").disabled = s.radarCharges >= s.radarMaxCharges || s.credits < s.radarBatteryCost;
@@ -295,16 +373,22 @@ export class GameUI {
     byId("storm-forecast").classList.toggle("hidden", s.state !== "playing" || s.stormPhase === "storm");
     if (s.state === "playing" && s.stormPhase !== "calm") {
       event.classList.remove("hidden"); event.classList.toggle("storm", s.stormPhase === "storm");
-      byId("event-text").textContent = `${this.t(s.stormPhase === "storm" ? s.severeStorm ? "storm.severe" : "storm.active" : "storm.warning")} · ${Math.ceil(s.stormTimer)} ${this.t("storm.seconds")}`;
+      byId("event-text").textContent = `${this.t(s.stormPhase === "storm" ? s.severeStorm ? "storm.severe" : "storm.active" : "storm.warning")} · ${this.t("unit.seconds", { n: this.fmt(Math.ceil(s.stormTimer)) })}`;
     } else event.classList.add("hidden");
     const prompt = byId("prompt"); if (s.state === "playing" && s.prompt) { prompt.classList.remove("hidden"); byId("prompt-text").textContent = s.prompt; } else prompt.classList.add("hidden");
     const hint = byId("build-hint");
-    if (s.buildMode) {
+    if (s.buildMode && !(s.buildMode === "rail" && s.railEditor)) {
       hint.classList.remove("hidden");
-      hint.textContent = s.buildMode === "rail"
-        ? `${this.t(s.railSource === null ? "prompt.railSource" : "prompt.railTarget")} · ${this.t("prompt.railRotate")}`
+      const base = s.buildMode === "rail"
+        ? `${this.t("rail.drawHint")} · ${this.t("prompt.railMove")}`
         : `${this.t("build.place")} · ${this.t("build.cancel")}`;
+      const preview = s.buildPreview;
+      if (!preview || s.buildMode === "rail") hint.textContent = base;
+      else if (!preview.consumesPower) hint.textContent = `${base} · ${this.t(preview.connected ? "build.generatorAdds" : "toast.cableRange")} ${preview.connected ? this.fmt(preview.capacity) : ""}`.trim();
+      else if (preview.connected) hint.textContent = `${base} · ${this.t("build.powerLoad")} ${this.fmt(preview.load)}/${this.fmt(preview.capacity)} · ${this.t("build.efficiency")} ${this.percent(preview.efficiency * 100)}`;
+      else hint.textContent = `${base} · ${this.t(preview.reason === "network-full" ? "toast.networkFull" : "toast.noPowerHere")}`;
     } else hint.classList.add("hidden");
+    this.refreshRailEditor(s); this.refreshNetwork(s);
     document.querySelectorAll<HTMLButtonElement>("[data-build]").forEach((button) => {
       const value = button.dataset.build!; const type = value === "rail" ? null : value as BuildingType;
       const locked = type ? s.quest.index < BUILDINGS[type].unlockQuest : s.quest.index < 6;
@@ -318,7 +402,7 @@ export class GameUI {
   }
 
   private refreshRelays(s: GameSnapshot): void {
-    byId("relay-list").innerHTML = s.relays.map((relay) => `<article class="relay-card ${relay.repaired ? "online" : ""}"><div><b>${this.t(`relay.${relay.id}.name`)}</b><span>${this.t(relay.repaired ? "relay.online" : "relay.offline")}</span></div><p>${this.t(`relay.${relay.id}.bonus`)}</p><small>${this.t("relay.warmZone")}: ${this.fmt(relay.warmth)} m · ${this.t("objective.distance")}: ${this.fmt(relay.distance)} m</small><strong>${relay.repaired ? this.t("relay.restored") : `${this.fmt(relay.cost)} ◈ · E`}</strong></article>`).join("");
+    byId("relay-list").innerHTML = s.relays.map((relay) => `<article class="relay-card ${relay.repaired ? "online" : ""} ${relay.powered ? "live" : ""}"><div><b>${this.t(`relay.${relay.id}.name`)}</b><span>${this.t(relay.powered ? "relay.online" : relay.repaired ? "relay.needsPower" : "relay.offline")}</span></div><p>${this.t(`relay.${relay.id}.bonus`)}</p><small>${this.t("relay.warmZone")}: ${this.t("unit.distance", { n: this.fmt(relay.warmth) })} · ${this.t("objective.distance")}: ${this.t("unit.distance", { n: this.fmt(relay.distance) })}</small><strong>${relay.repaired ? this.t("relay.restored") : `${this.fmt(relay.cost)} ◈ · E`}</strong></article>`).join("");
   }
 
   private refreshLog(s: GameSnapshot): void {
@@ -338,27 +422,31 @@ export class GameUI {
     byId("hud").classList.toggle("building-open", !!b);
     if (!b) { card.classList.add("hidden"); return; }
     card.classList.remove("hidden"); card.classList.toggle("damaged", b.damaged);
-    byId("building-name").textContent = this.t(`building.${b.type}.name`); byId("building-level").textContent = `${this.t("shop.level")} ${this.fmt(b.level)}`;
-    byId("building-desc").textContent = this.t(`building.${b.type}.desc`) + (b.generatorRadius ? ` · ${this.amount(b.generatorRadius)}m` : "");
+    byId("building-name").textContent = this.t(`building.${b.type}.name`); byId("building-level").textContent = this.t("shop.levelLine", { n: this.fmt(b.level) });
+    byId("building-desc").textContent = this.t(`building.${b.type}.desc`) + (b.generatorRadius ? ` · ${this.t("unit.distance", { n: this.amount(b.generatorRadius) })}` : "");
     const production = byId("building-production"); production.classList.toggle("hidden", b.productionRate === undefined);
     if (b.productionRate !== undefined) {
       byId("building-production-rate").textContent = `${this.amount(b.productionRate)} ${this.t(`build.unit.${b.productionUnit}`)}`;
       byId("building-next-rate").textContent = b.nextProductionRate !== undefined && b.level < 3 ? `${this.t("build.nextLevel")}: ${this.amount(b.nextProductionRate)} ${this.t(`build.unit.${b.productionUnit}`)}` : this.t("shop.max");
     }
+    const factory = b.factoryState === "power" ? this.t("build.state.power")
+      : b.factoryState === "input" ? this.t("build.state.input")
+      : b.factoryState === "output" ? this.t("build.state.output")
+      : b.factoryState === "processing" ? this.t("build.state.processing")
+      : "";
     byId("building-status").textContent = b.damaged ? `⚠ ${this.t("build.damaged")}`
       : b.robotFrozen ? `❄ ${this.t("hud.robotFrozen")} · E ${this.t("prompt.rescue")}`
-      : b.robotThaw ? `${this.t("hud.thaw")} ${this.fmt(b.robotThaw * 100)}%`
-      : !b.powered ? this.t("build.unpowered")
-      : b.robotMode ? `${this.t("build.robotMode")}: ${this.t(`robot.mode.${b.robotMode}`)}`
-      : this.t("build.powered");
+      : b.robotThaw ? `${this.t("hud.thaw")} ${this.percent(b.robotThaw * 100)}`
+      : factory || (!b.powered ? this.t("build.unpowered") : b.robotMode ? `${this.t("build.robotMode")}: ${this.t(`robot.mode.${b.robotMode}`)}` : this.t("build.powered"));
     byId("building-status").classList.toggle("unpowered", b.damaged || !b.powered || !!b.robotFrozen);
+    byId("building-status").classList.toggle("blocked", b.factoryState === "output");
     const robotRow = byId("building-robot-row"); robotRow.classList.toggle("hidden", b.robotCarry === undefined || !b.robotCapacity);
     if (b.robotCarry !== undefined && b.robotCapacity) {
       byId("building-robot-tank").textContent = `${this.amount(b.robotCarry)} / ${this.amount(b.robotCapacity)}`;
       byId("building-robot-bar").style.width = `${Math.min(100, b.robotCarry / b.robotCapacity * 100)}%`;
     }
     byId("building-health-row").classList.toggle("hidden", b.robotHealth === undefined);
-    if (b.robotHealth !== undefined) { byId("building-robot-health").textContent = `${this.amount(b.robotHealth)}%`; byId("building-robot-health-bar").style.width = `${b.robotHealth}%`; }
+    if (b.robotHealth !== undefined) { byId("building-robot-health").textContent = this.percent(b.robotHealth); byId("building-robot-health-bar").style.width = `${b.robotHealth}%`; }
     byId("building-input-row").classList.toggle("hidden", b.inputCapacity <= 0);
     byId("building-output-row").classList.toggle("hidden", b.outputCapacity <= 0);
     byId("building-no-storage").classList.toggle("hidden", b.inputCapacity > 0 || b.outputCapacity > 0 || b.robotCarry !== undefined);
@@ -366,16 +454,39 @@ export class GameUI {
     byId("building-output").textContent = `${this.amount(b.output)} / ${this.amount(b.outputCapacity)}`;
     byId("building-input-bar").style.width = `${b.inputCapacity > 0 ? Math.min(100, b.input / b.inputCapacity * 100) : 0}%`;
     byId("building-output-bar").style.width = `${b.outputCapacity > 0 ? Math.min(100, b.output / b.outputCapacity * 100) : 0}%`;
+    const cycling = b.type === "press" && (b.progress > 0.001 || b.factoryState === "processing");
+    const shipping = !!b.dispatching && b.output < 0.5 && b.factoryState === "processing";
+    byId("building-cycle-row").classList.toggle("hidden", !cycling);
+    if (cycling) { byId("building-cycle").textContent = this.percent(b.progress * 100); byId("building-cycle-bar").style.width = `${Math.min(100, b.progress * 100)}%`; }
+    const shippingNote = byId("building-shipping"); shippingNote.classList.toggle("hidden", !shipping); if (shipping) shippingNote.textContent = this.t("build.shipping");
+    if (shipping) byId("building-status").textContent = `${this.t("build.state.processing")} · ${this.t("build.shipping")}`;
     const source = b.powerSource === "base" ? this.t("power.base") : b.powerSource.startsWith("generator:") ? `${this.t("power.generator")} #${b.powerSource.split(":")[1]}` : this.t("power.none");
     byId("building-power-source").textContent = source;
     byId("building-power-load").textContent = b.powerCapacity > 0 ? `${this.fmt(b.powerLoad)} / ${this.fmt(b.powerCapacity)}` : "—";
-    byId("building-efficiency").textContent = b.powerCapacity > 0 ? `${this.fmt(b.powerEfficiency * 100)}%` : "—";
+    byId("building-efficiency").textContent = b.powerCapacity > 0 ? this.percent(b.powerEfficiency * 100) : "—";
     byId("building-cable-label").classList.toggle("hidden", b.type !== "generator"); byId("building-cable").classList.toggle("hidden", b.type !== "generator");
     byId("building-cable").textContent = this.t(b.cableConnected ? "build.connected" : "build.disconnected");
     const repair = byId<HTMLButtonElement>("repair-building-btn"); const serviceCost = b.robotServiceCost ?? 0;
     repair.classList.toggle("hidden", !b.damaged && serviceCost <= 0);
     const repairCost = b.damaged ? b.repairCost : serviceCost;
     repair.textContent = `${this.t(b.damaged ? "action.repair" : "action.serviceRobot")} · ${this.fmt(repairCost)} ◈`; repair.disabled = s.credits < repairCost;
+    const workActions = byId("work-area-actions"); const workNote = byId("work-area-note");
+    const showWork = b.type === "sweeper" && !s.workAim;
+    workActions.classList.toggle("hidden", !showWork);
+    byId<HTMLButtonElement>("work-area-set").textContent = this.t("robot.setArea");
+    const autoButton = byId<HTMLButtonElement>("work-area-auto");
+    autoButton.classList.toggle("hidden", !b.workArea);
+    autoButton.textContent = this.t("robot.clearArea");
+    workNote.classList.toggle("hidden", !b.workArea || !!s.workAim);
+    if (b.workArea) workNote.textContent = `${this.t(b.workArea.fallback ? "robot.areaFallback" : "robot.areaLive")} · ${this.t("unit.distance", { n: this.fmt(b.workArea.radius) })}`;
+    const aimBar = byId("work-area-bar");
+    aimBar.classList.toggle("hidden", !s.workAim);
+    if (s.workAim) {
+      byId("work-area-hint").textContent = `${this.t("robot.areaHint")} · ${this.t("unit.distance", { n: this.fmt(s.workAim.radius) })}`;
+      byId("work-area-confirm").textContent = this.t("robot.areaConfirm");
+      byId("work-area-cancel").textContent = this.t("robot.areaCancel");
+      byId<HTMLButtonElement>("work-area-confirm").disabled = !s.workAim.locked;
+    }
     const button = byId<HTMLButtonElement>("upgrade-building-btn"); button.textContent = b.level >= 3 ? this.t("shop.max") : `${this.t("action.upgrade")} · ${this.fmt(BUILDINGS[b.type].upgradeCost * b.level)} ◈`;
     button.disabled = b.damaged || b.level >= 3 || s.credits < BUILDINGS[b.type].upgradeCost * b.level;
   }
@@ -393,11 +504,11 @@ export class GameUI {
         const localArea = Math.PI * r.zoneRange * r.zoneRange; const active = s.chunks.find((chunk) => chunk.id === r.activeChunk);
         const queued = r.chunkIds.map((id) => s.chunks[id]?.name).filter(Boolean).join(" · ") || "—";
         const chunkButtons = s.chunks.map((chunk) => `<button class="chunk-cell ${chunk.id === r.activeChunk ? "active" : ""} ${r.chunkIds.includes(chunk.id) ? "queued" : ""} ${chunk.remaining < 0.55 ? "clean" : ""}" style="--clean:${Math.round(chunk.progress * 100)}%" data-chunk-mode="${b.id}:${r.slot}" data-chunk-id="${chunk.id}" title="${chunk.name} · ${this.amount(chunk.remaining)} ${this.t("robot.remaining")}" aria-label="${chunk.name}"><span>${chunk.name}</span></button>`).join("");
-        zones = `<div class="robot-zone robot-chunks"><div class="zone-mode-row"><label><span>${this.t("robot.zone")}</span><select data-zone-mode="${b.id}:${r.slot}"><option value="auto" ${mode === "auto" ? "selected" : ""}>${this.t("robot.zoneAuto")}</option><option value="follow" ${mode === "follow" ? "selected" : ""}>${this.t("robot.zoneFollow")}</option><option value="custom" ${mode === "custom" ? "selected" : ""}>${this.t("robot.zoneCustom")}</option></select></label><div class="chunk-quota"><span>${this.t("robot.chunkQuota")}</span><b>${r.chunkQuota} × ${this.area(chunkArea)} m² = ${this.area(r.chunkQuota * chunkArea)} m²</b></div></div><div class="zone-measurements"><span>${this.t(mode === "auto" ? "robot.aroundDock" : mode === "follow" ? "robot.aroundPlayer" : "robot.aroundChunk")}</span><b>${this.area(r.zoneRange)} m · ${this.area(localArea)} m²</b></div><p class="zone-explain">${this.t("robot.zoneHint")}</p><div class="active-chunk"><span>${this.t("robot.activeChunk")}: <b>${active?.name ?? "—"}</b> · ${this.amount(r.chunkProgress * 100)}%</span><span>${this.t("robot.queue")}: ${queued}</span></div><div class="chunk-map" style="--chunk-columns:${s.chunkColumns}">${chunkButtons}</div><small class="chunk-legend">${this.t("robot.chunkLegend")} · ${s.chunkColumns} × ${s.chunkColumns} = ${s.chunks.length} · ${this.area(s.chunkSize)} m / ${this.area(chunkArea)} m²</small></div>`;
+        zones = `<div class="robot-zone robot-chunks"><div class="zone-mode-row"><label><span>${this.t("robot.zone")}</span><select data-zone-mode="${b.id}:${r.slot}"><option value="auto" ${mode === "auto" ? "selected" : ""}>${this.t("robot.zoneAuto")}</option><option value="follow" ${mode === "follow" ? "selected" : ""}>${this.t("robot.zoneFollow")}</option><option value="custom" ${mode === "custom" ? "selected" : ""}>${this.t("robot.zoneCustom")}</option><option value="shelter" ${mode === "shelter" ? "selected" : ""}>${this.t("robot.zoneShelter")}</option><option value="supply" ${mode === "supply" ? "selected" : ""}>${this.t("robot.zoneSupply")}</option>${mode === "area" ? `<option value="area" selected>${this.t("robot.zoneArea")}</option>` : ""}</select></label><div class="chunk-quota"><span>${this.t("robot.chunkQuota")}</span><b>${r.chunkQuota} × ${this.area(chunkArea)} ${this.t("unit.sq")} = ${this.area(r.chunkQuota * chunkArea)} ${this.t("unit.sq")}</b></div></div><div class="zone-measurements"><span>${this.t(mode === "auto" ? "robot.aroundDock" : mode === "follow" ? "robot.aroundPlayer" : "robot.aroundChunk")}</span><b>${this.area(r.zoneRange)} m · ${this.area(localArea)} m²</b></div><p class="zone-explain">${this.t(mode === "shelter" ? "robot.zoneShelterHint" : mode === "supply" ? "robot.zoneSupplyHint" : "robot.zoneHint")}</p><div class="active-chunk"><span>${this.t("robot.activeChunk")}: <b>${active?.name ?? "—"}</b> · ${this.amount(r.chunkProgress * 100)}%</span><span>${this.t("robot.queue")}: ${queued}</span></div><div class="chunk-map" style="--chunk-columns:${s.chunkColumns}">${chunkButtons}</div><small class="chunk-legend">${this.t("robot.chunkLegend")} · ${s.chunkColumns} × ${s.chunkColumns} = ${s.chunks.length} · ${this.area(s.chunkSize)} m / ${this.area(chunkArea)} m²</small></div>`;
       }
       const purchase = b.type === "sweeper" && r.slot === b.robots!.length - 1 && b.robots!.length < b.level ? `<button class="buy-btn extra-robot-btn" data-buy-robot="${b.id}" ${b.damaged || s.credits < (b.extraRobotCost ?? 0) ? "disabled" : ""}>${this.t("robot.buyExtra")} · ${this.fmt(b.extraRobotCost ?? 0)} ◈ (${b.robots!.length}/${b.level})</button>` : "";
       const rescuePolicy = r.kind === "hauler" ? `<label class="rescue-policy"><input type="checkbox" data-repair-allowed="${b.id}:${r.slot}" ${r.repairAllowed ? "checked" : ""}><span>${this.t("robot.allowRepairs")}</span></label><small class="rescue-costs">${this.t("robot.rescueCosts")}</small>` : "";
-      return `<article class="robot-card ${b.damaged ? "damaged" : ""} ${r.kind === "sweeper" ? "sweeper-card" : ""}"><div class="robot-card-head"><b>${this.t(`building.${b.type}.name`)} #${b.id} · ${this.t("robot.unit")} ${r.slot + 1}</b><span>${this.t(b.damaged ? "robot.mode.damaged" : r.frozen ? "hud.robotFrozen" : b.powered ? "build.powered" : "build.unpowered")}</span></div><p>${this.t(`robot.role.${r.kind}`)}</p><div class="robot-mode">${this.t("build.robotMode")}: <b>${this.t(`robot.mode.${r.mode}`)}</b></div><div class="robot-meter-label"><span>${this.t("hud.robotHealth")}</span><b>${this.amount(r.health)}%</b></div><div class="meter robot-health-meter"><i style="width:${r.health}%"></i></div>${tank}${output}${zones}<div class="robot-telemetry"><span>${this.t("build.robotTemp")}: ${this.fmt(r.temperature)}%</span><span>${this.t("build.efficiency")}: ${b.powerCapacity ? this.fmt(b.powerEfficiency * 100) : 0}%</span></div>${rescuePolicy}${purchase}</article>`;
+      return `<article class="robot-card ${b.damaged ? "damaged" : ""} ${r.kind === "sweeper" ? "sweeper-card" : ""}"><div class="robot-card-head"><b>${this.t(`building.${b.type}.name`)} #${b.id} · ${this.t("robot.unit")} ${r.slot + 1}</b><span>${this.t(b.damaged ? "robot.mode.damaged" : r.frozen ? "hud.robotFrozen" : b.powered ? "build.powered" : "build.unpowered")}</span></div><p>${this.t(`robot.role.${r.kind}`)}</p><div class="robot-mode">${this.t("build.robotMode")}: <b>${this.t(`robot.mode.${r.mode}`)}</b></div><div class="robot-meter-label"><span>${this.t("hud.robotHealth")}</span><b>${this.percent(r.health)}</b></div><div class="meter robot-health-meter"><i style="width:${r.health}%"></i></div>${tank}${output}${zones}<div class="robot-telemetry"><span>${this.t("build.robotTemp")}: ${this.percent(r.temperature)}</span><span>${this.t("build.efficiency")}: ${b.powerCapacity ? this.percent(b.powerEfficiency * 100) : this.percent(0)}</span></div>${rescuePolicy}${purchase}</article>`;
     })).join("") : `<p class="robot-empty">${this.t("robot.empty")}</p>`;
     byId("robot-list").querySelectorAll<HTMLButtonElement>("[data-buy-robot]").forEach((button) => button.onclick = () => this.handlers.buyExtraRobot(Number(button.dataset.buyRobot)));
     byId("robot-list").querySelectorAll<HTMLInputElement>("[data-repair-allowed]").forEach((input) => input.onchange = () => {
@@ -419,23 +530,32 @@ export class GameUI {
       const level = s.tools[tool.id]; const locked = s.quest.index < tool.unlockQuest; const card = byId(`tool-${tool.id}`); card.classList.toggle("owned", level > 0); card.classList.toggle("locked", locked);
       const buy = card.querySelector<HTMLButtonElement>("[data-buy-tool]")!; const use = card.querySelector<HTMLButtonElement>("[data-use-tool]")!; const repair = card.querySelector<HTMLButtonElement>("[data-repair-tool]")!;
       const health = s.toolHealth[tool.id]; const repairCost = toolRepairCost(tool.id, level);
-      byId(`tool-health-${tool.id}`).textContent = `${this.amount(health)}%`; byId(`tool-health-shop-${tool.id}`).style.width = `${health}%`;
+      byId(`tool-health-${tool.id}`).textContent = this.percent(health); byId(`tool-health-shop-${tool.id}`).style.width = `${health}%`;
       repair.textContent = health >= 99.99 ? this.t("shop.healthy") : `${this.t("action.repair")} · ${this.fmt(repairCost)} ◈`;
       repair.disabled = level === 0 || health >= 99.99 || s.credits < repairCost;
       const cost = level >= 4 ? 0 : level === 0 ? tool.cost : TOOL_UPGRADES[tool.id][level - 1];
       buy.textContent = locked ? this.t("toast.locked") : level >= 4 ? this.t("shop.max") : `${this.t("shop.buy")} · ${this.fmt(cost)} ◈`;
       buy.disabled = locked || level >= 4 || s.credits < cost;
       use.textContent = s.selectedTool === tool.id ? this.t("shop.equipped") : this.t("shop.use"); use.disabled = level === 0 || s.selectedTool === tool.id;
-      const stats = toolTierStats(tool.id, level); const next = level > 0 && level < 4 ? toolTierStats(tool.id, level + 1) : null;
-      byId(`tool-level-${tool.id}`).textContent = `${level ? `${this.t("shop.level")} ${this.fmt(level)} · ` : ""}${this.t("hud.capacity")} ${this.fmt(stats.capacity)}${next ? ` → ${this.fmt(next.capacity)}` : ""}`;
+      const stats = toolTierStats(tool.id, Math.max(1, level)); const next = level > 0 && level < 4 ? toolTierStats(tool.id, level + 1) : null;
+      const thinNow = toolClearRate(stats, 0.3), deepNow = toolClearRate(stats, 1);
+      const thinNext = next ? toolClearRate(next, 0.3) : null, deepNext = next ? toolClearRate(next, 1) : null;
+      const step = (now: number, later: number | null) => later == null ? this.amount(now) : `${this.amount(now)} → ${this.amount(later)}`;
+      byId(`tool-level-${tool.id}`).textContent = `${level ? `${this.t("shop.levelLine", { n: this.fmt(level) })} · ` : ""}${this.t("hud.capacity")} ${this.fmt(stats.capacity)}${next ? ` → ${this.fmt(next.capacity)}` : ""}`;
       const detail = byId(`tool-stats-${tool.id}`);
-      detail.textContent = `${this.t("tool.statSpeed")} ${this.amount(stats.rate)}${next ? ` → ${this.amount(next.rate)}` : ""} · ${this.t("tool.statRadius")} ${this.amount(stats.radius)}${next ? ` → ${this.amount(next.radius)}` : ""} m\n${this.t("tool.statPower")} ${this.fmt(stats.yield * 100)}%${next ? ` → ${this.fmt(next.yield * 100)}%` : ""} · ${this.t("tool.statArea")} ${this.amount(stats.area)} m²`;
-      detail.title = this.t("tool.statUpgradeHint");
+      const wear = (value: number) => new Intl.NumberFormat(locale(this.language), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+      const tradeText = stats.pace < 0.97
+        ? `${this.t("tool.statPace")} ${this.percent(stats.pace * 100)}${next ? ` → ${this.percent(next.pace * 100)}` : ""}`
+        : stats.heat < 0.96
+          ? `${this.t("tool.statHeat")} ${this.percent(stats.heat * 100)}${next ? ` → ${this.percent(next.heat * 100)}` : ""}`
+          : `${this.t("tool.statWear")} ${wear(stats.wear)}${next ? ` → ${wear(next.wear)}` : ""}`;
+      detail.textContent = `${this.t("tool.statThin")} ${step(thinNow, thinNext)} · ${this.t("tool.statDeep")} ${step(deepNow, deepNext)}\n${this.t("tool.statRadius")} ${step(stats.radius, next?.radius ?? null)} ${this.t("unit.m")} · ${this.t("tool.statReach")} ${step(stats.distance, next?.distance ?? null)} ${this.t("unit.m")}\n${this.t("tool.statPower")} ${this.percent(stats.yield * 100)}${next ? ` → ${this.percent(next.yield * 100)}` : ""} · ${tradeText}`;
+      detail.title = this.t(`tool.${tool.id}.desc`);
     }
     for (const u of UPGRADES) {
       const level = s.upgrades[u.id]; const cost = u.costs[level] ?? 0; const button = document.querySelector<HTMLButtonElement>(`[data-buy-gear="${u.id}"]`)!;
       button.textContent = level >= 3 ? this.t("shop.max") : `${this.t("shop.buy")} · ${this.fmt(cost)} ◈`; button.disabled = level >= 3 || s.credits < cost;
-      byId(`gear-${u.id}`).classList.toggle("owned", level > 0); byId(`gear-level-${u.id}`).textContent = `${this.t("shop.level")} ${this.fmt(level)} / 3`;
+      byId(`gear-${u.id}`).classList.toggle("owned", level > 0); byId(`gear-level-${u.id}`).textContent = this.t("shop.levelOf", { n: this.fmt(level), max: this.fmt(3) });
     }
     byId("battery-level").textContent = `${this.t("hud.charges")} ${this.fmt(s.radarCharges)} / ${this.fmt(s.radarMaxCharges)}`;
     const battery = document.querySelector<HTMLButtonElement>("[data-buy-battery]")!;

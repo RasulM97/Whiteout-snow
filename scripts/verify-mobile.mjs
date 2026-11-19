@@ -79,10 +79,12 @@ try {
   // separately captured landscape/portrait frames are visually reviewed.
   console.log("PASS: mobile landscape input flow complete");
   await mp.setViewportSize({ width: 390, height: 844 }); await mp.waitForTimeout(400);
-  assert((await debug(mp, "snapshot")).state === "paused" && !(await mp.locator("#touch-controls").isVisible()), "rotating to portrait safely pauses and hides gameplay touch controls");
-  assert(await mp.locator("#orientation-lock").isVisible(), "portrait orientation presents the dedicated rotate-to-landscape screen");
-  await mp.setViewportSize({ width: 844, height: 390 }); await mp.waitForTimeout(250); await mp.tap("#resume-btn");
-  assert((await debug(mp, "snapshot")).state === "playing" && await mp.locator("#touch-controls").isVisible(), "returning to landscape resumes functional touch play");
+  assert((await debug(mp, "snapshot")).state === "playing" && !(await mp.locator("#touch-controls").isVisible()), "portrait keeps the operation running and hides the wide-screen stick");
+  const portraitBanner = await mp.locator("#orientation-lock").boundingBox();
+  assert(await mp.locator("#orientation-lock").isVisible() && portraitBanner && portraitBanner.height < 180 && portraitBanner.y < 90, "portrait shows a landscape recommendation that does not cover the station");
+  await mp.setViewportSize({ width: 844, height: 390 }); await mp.waitForTimeout(250);
+  if (await mp.locator("#resume-btn").isVisible()) await mp.tap("#resume-btn");
+  assert((await debug(mp, "snapshot")).state === "playing" && await mp.locator("#touch-controls").isVisible() && !(await mp.locator("#orientation-lock").isVisible()), "returning to landscape restores functional touch play");
   const overflow = await mp.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
   assert(!overflow, "mobile landscape interface has no horizontal page overflow");
   await mobile.close();

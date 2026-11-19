@@ -163,7 +163,7 @@ try {
   await debug("setCarried", 0.5, 0); await debug("interact"); state = await snap();
   assert(state.purified === 0 && state.credits === 92, "partial purified cargo sells without a full tank");
   await debug("setCarried", 0, 1); await debug("interact"); state = await snap();
-  assert(state.ice === 0 && state.credits === 147 && state.iceSold === 1, "a single ice block sells without any other cargo");
+  assert(state.ice === 0 && state.credits === 134 && state.iceSold === 1, "a single ice block sells without any other cargo");
   await debug("scan"); assert((await snap()).radarCharges === 2, "each handheld scan consumes exactly one stacked charge");
   await debug("step", 7); await debug("scan"); assert((await snap()).radarCharges === 1, "a second ready pulse consumes the next charge");
   const beforeBattery = (await snap()).credits; await debug("buyBattery");
@@ -390,10 +390,10 @@ try {
   });
   assert(desktopBuildingLayout.visible && desktopBuildingLayout.bounded && !desktopBuildingLayout.overlaps, `desktop building card stays bounded and clear of every HUD instrument (${JSON.stringify(desktopBuildingLayout)})`);
   await page.screenshot({ path: join(SHOTS, "03-busy-desktop.png") });
-  await debug("recoverAll"); assert((await snap()).state === "playing" && (await snap()).cleanupPercent < 98, "evidence and power alone cannot finish an uncleared map");
+  await debug("recoverAll"); assert((await snap()).state === "playing" && (await snap()).cleanupPercent < 95, "evidence and power alone cannot finish an uncleared map");
   assert((await snap()).events.filter((e) => e.kind === "clue").length === 3, "all three discovered clue texts remain in persistent event data");
   await debug("openLog"); assert(await page.locator("#event-list .event-entry").count() >= 3 && (await page.locator("#event-list").innerText()).includes("Manifest 07"), "event archive reopens the actual recovered clue text"); await page.click("#close-log-btn"); if (await page.locator("#resume-btn").isVisible()) await page.click("#resume-btn");
-  await debug("win"); assert((await snap()).state === "victory" && (await snap()).cleanupPercent >= 98, "victory requires full-map cleanup, clues and power");
+  await debug("win"); assert((await snap()).state === "victory" && (await snap()).cleanupPercent >= 95, "victory requires 95% cleanup, clues and power");
   assert((await page.locator("#end-copy").innerText()).includes("organized signal") && (await page.locator("#end-copy").innerText()).includes("transmitted"), "staged mystery concludes by exposing and transmitting the shipment evidence");
 
   }
@@ -486,12 +486,15 @@ try {
   await page.evaluate(() => { const d = window.__whiteoutDebug; for (let x = -12; x <= 36; x += 4) for (let z = -12; z <= 36; z += 4) d.clearAt(x, z, 3.5); d.step(1); });
   const expandedRobot = (await debug("robotStates")).find((r) => r.id === coldRobot); assert(expandedRobot.searchRange > 16, `sweeper expands beyond its almost-clean local area instead of waiting for another storm (${JSON.stringify(expandedRobot)})`);
   await debug("step", 120); let robot = (await debug("robotStates")).find((r) => r.id === coldRobot);
-  assert(!robot.frozen && robot.temperature > 0 && robot.temperature < 35, `robot remains operational after two cold-weather minutes (${JSON.stringify(robot)})`);
-  await debug("step", 62); robot = (await debug("robotStates")).find((r) => r.id === coldRobot);
-  assert(robot.frozen, `robot freezes only after the extended outdoor endurance window (${JSON.stringify(robot)})`);
+  assert(!robot.frozen && robot.temperature > 20, `reachable base heat keeps the sweeper working after two cold minutes (${JSON.stringify(robot)})`);
+  const isolated = await debug("build", "sweeper", 58, 50);
+  await debug("setRobotTemperature", isolated, 0, 6, false);
+  await debug("step", 16);
+  robot = (await debug("robotStates")).find((r) => r.id === isolated);
+  assert(robot.frozen && robot.mode !== "warm-return" && robot.mode !== "recharge", `a sweeper that cannot reach heat still freezes (${JSON.stringify(robot)})`);
   await debug("giveCredits", 150); const manualRescueCredits = (await snap()).credits;
   await debug("teleport", robot.x, robot.z); await debug("interact"); await debug("step", 3.2);
-  assert(!(await debug("robotStates")).find((r) => r.id === coldRobot).frozen && (await snap()).credits === manualRescueCredits - 150, "three-second manual warming rescues a frozen robot for exactly 150 credits");
+  assert(!(await debug("robotStates")).find((r) => r.id === isolated).frozen && (await snap()).credits === manualRescueCredits - 150, "three-second manual warming rescues a frozen robot for exactly 150 credits");
 
   // Main-base capacity limit and diminishing efficiency.
   await debug("start"); await debug("setQuest", 8);
@@ -605,7 +608,8 @@ try {
   await mobile.waitForFunction(() => window.__GAME_READY__ && !!window.__whiteoutDebug, null, { timeout: 90000 });
   await mobile.evaluate(() => { const d = window.__whiteoutDebug; d.start(); d.setQuest(8); d.build("sweeper", 10, 12); d.build("hauler", -12, 12); d.teleport(10, 12); });
   await mobile.waitForTimeout(350);
-  assert(await mobile.locator("#orientation-lock").isVisible() && !(await mobile.locator("#touch-controls").isVisible()), "portrait mobile blocks play behind a mandatory rotate-device overlay");
+  const portraitBanner = await mobile.locator("#orientation-lock").boundingBox();
+  assert(await mobile.locator("#orientation-lock").isVisible() && !(await mobile.locator("#touch-controls").isVisible()) && portraitBanner && portraitBanner.height < 180, "portrait shows a nonblocking landscape recommendation");
   await mobile.setViewportSize({ width: 844, height: 390 }); await mobile.waitForTimeout(350);
   if (await mobile.locator("#resume-btn").isVisible()) await mobile.tap("#resume-btn");
   assert(!(await mobile.locator("#orientation-lock").isVisible()) && await mobile.locator("#touch-controls").isVisible(), "landscape rotation removes the lock and restores touch controls after safe resume");

@@ -41,7 +41,7 @@ const secondsPerRobotCycle = gatherSeconds + roundTripSeconds + retargetSeconds;
 const rawPerRobotSecond = robotCapacity / secondsPerRobotCycle;
 const fleetRawPerSecond = rawPerRobotSecond * robotCount * logisticsUptime;
 const rawForFullMap = initialDensity * robotYield;
-const robotCleanupSeconds = rawForFullMap * 0.98 / fleetRawPerSecond * sparsePatchPenalty + zoneReassignmentSeconds;
+const robotCleanupSeconds = rawForFullMap * 0.95 / fleetRawPerSecond * sparsePatchPenalty + zoneReassignmentSeconds;
 
 const walkingSpeed = 5.6 * 1.36;
 const sprintingSpeed = walkingSpeed * 1.62;
@@ -64,7 +64,7 @@ console.log(`Robot cycle: gather ${gatherSeconds.toFixed(1)}s + round trip ${rou
 console.log(`Effective fleet rate after dock/logistics downtime: ${fleetRawPerSecond.toFixed(2)} raw/s`);
 console.log(`One-way raw capsule route capacity: ${rawRouteThroughput.toFixed(2)} raw/s; ${productionLines} upgraded purifiers: ${(purifierRawThroughput * productionLines).toFixed(2)} raw/s`);
 if (rawRouteThroughput < fleetRawPerSecond || purifierRawThroughput * productionLines < fleetRawPerSecond) throw new Error("Production or one-way capsule throughput bottlenecks the reviewed completion route");
-console.log(`Automated 98% cleanup including sparse patches and zone moves: ${(robotCleanupSeconds / 60).toFixed(1)} min`);
+console.log(`Automated 95% cleanup including sparse patches and zone moves: ${(robotCleanupSeconds / 60).toFixed(1)} min`);
 console.log(`Late player work performed in parallel: ${(parallelLateWorkSeconds / 60).toFixed(1)} min`);
 console.log(`Estimated fastest complete run: ${fastestMinutes.toFixed(1)} min`);
 console.log(`Estimated typical first successful run: ${typicalMinutes.toFixed(1)} min`);

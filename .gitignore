@@ -30,3 +30,22 @@ graphify-out
 
 # Local build cleanup history
 .game-build-files.json
+
+# Generated screenshots, caches, and local test output
+phase6-shots
+phase7-shots
+phase8-shots
+phase9-shots
+phase10-shots
+batch3-shots
+quality-shots
+railv2-shots
+railv3-shots
+tool-balance
+tool-balance-shots
+verification-journey
+verification-revision
+playwright-report
+test-results
+blob-report
+*.trace.zip

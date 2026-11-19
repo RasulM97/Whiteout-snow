@@ -1,14 +1,109 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { COLORS } from "./config";
 import type { ToolId } from "./types";
 import type { ModelLibrary } from "./models";
 import { mesh } from "./world";
 
+function merged(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  if (parts.length === 1) return parts[0];
+  const geometry = mergeGeometries(parts, false);
+  if (!geometry) throw new Error("Tool geometry merge failed");
+  for (const part of parts) part.dispose();
+  return geometry;
+}
+
+function toolMesh(geometry: THREE.BufferGeometry, material: THREE.Material, parent: THREE.Object3D): THREE.Mesh {
+  const part = new THREE.Mesh(geometry, material);
+  part.castShadow = true;
+  part.receiveShadow = true;
+  parent.add(part);
+  return part;
+}
+
+function scoopGeometry(): THREE.BufferGeometry {
+  const across = 14;
+  const along = 10;
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const point = (u: number, v: number, shell: number) => {
+    const edge = Math.abs(u);
+    const end = Math.abs(v * 2 - 1);
+    const width = 0.37 + v * 0.05;
+    const corner = edge * edge * end * end;
+    const x = u * width * (1 - corner * 0.26) * (shell ? 0.97 : 1);
+    const z = 1.23 + v * 0.48 * (1 - corner * 0.12) - shell * 0.008;
+    const sideLip = edge * edge * 0.072 * (0.3 + 0.7 * (1 - v) ** 1.15);
+    const rearLip = (1 - v) ** 2 * 0.065;
+    const belly = (1 - edge * edge) * Math.sin(Math.min(1, v * 1.08) * Math.PI) * 0.068;
+    const y = -0.16 + sideLip + rearLip - v * 0.062 - belly - shell * 0.048;
+    return [x, y, z];
+  };
+  const addLayer = (shell: number) => {
+    const base = positions.length / 3;
+    for (let j = 0; j <= along; j++) {
+      for (let i = 0; i <= across; i++) positions.push(...point((i / across) * 2 - 1, j / along, shell));
+    }
+    const row = across + 1;
+    for (let j = 0; j < along; j++) {
+      for (let i = 0; i < across; i++) {
+        const a = base + j * row + i;
+        const b = a + 1;
+        const c = a + row;
+        const d = c + 1;
+        if (shell === 0) indices.push(a, c, b, b, c, d);
+        else indices.push(a, b, c, b, d, c);
+      }
+    }
+    return base;
+  };
+  const top = addLayer(0);
+  const bottom = addLayer(1);
+  const row = across + 1;
+  const stitch = (edge: number[], outward: boolean) => {
+    for (let k = 0; k < edge.length - 1; k++) {
+      const a = edge[k];
+      const b = edge[k + 1];
+      const c = a + (bottom - top);
+      const d = b + (bottom - top);
+      if (outward) indices.push(a, b, c, b, d, c);
+      else indices.push(a, c, b, b, c, d);
+    }
+  };
+  const rear: number[] = [];
+  const front: number[] = [];
+  const left: number[] = [];
+  const right: number[] = [];
+  for (let i = 0; i <= across; i++) {
+    rear.push(top + i);
+    front.push(top + along * row + i);
+  }
+  for (let j = 0; j <= along; j++) {
+    left.push(top + j * row);
+    right.push(top + j * row + across);
+  }
+  stitch(rear, true);
+  stitch(front, false);
+  stitch([...left].reverse(), true);
+  stitch(right, true);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function collarGeometry(): THREE.BufferGeometry {
+  const geometry = new THREE.CylinderGeometry(0.13, 0.13, 0.24, 10);
+  geometry.rotateX(Math.PI / 2);
+  return geometry;
+}
+
 function createToolModels(nozzle: THREE.Group, shell: THREE.Material, dark: THREE.Material, white: THREE.Material, glow: THREE.Material): Record<ToolId, THREE.Group> {
   const tools = {} as Record<ToolId, THREE.Group>;
   for (const id of ["hands", "shovel", "brush", "blower", "vacuum"] as ToolId[]) {
     tools[id] = new THREE.Group(); tools[id].name = `tool-${id}`; nozzle.add(tools[id]);
-    mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.24, 10), dark, tools[id], 0, 0, 0).rotation.x = Math.PI / 2;
+    if (id !== "shovel" && id !== "brush") mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.24, 10), dark, tools[id], 0, 0, 0).rotation.x = Math.PI / 2;
   }
   const hands = tools.hands;
   mesh(new THREE.BoxGeometry(0.65, 0.12, 0.62), shell, hands, 0, -0.18, 0.48);
@@ -19,18 +114,59 @@ function createToolModels(nozzle: THREE.Group, shell: THREE.Material, dark: THRE
     mesh(new THREE.IcosahedronGeometry(s, 1), white, hands, x, y, z);
   }
   const shovel = tools.shovel;
-  const shovelBoom = mesh(new THREE.CylinderGeometry(0.075, 0.09, 1.35, 10), shell, shovel, 0, 0, 0.72); shovelBoom.rotation.x = Math.PI / 2;
-  mesh(new THREE.BoxGeometry(0.72, 0.14, 0.16), dark, shovel, 0, -0.05, 1.3);
-  const blade = mesh(new THREE.BoxGeometry(0.72, 0.12, 0.65), white, shovel, 0, -0.2, 1.55); blade.rotation.x = -0.28;
-  for (const x of [-0.29, 0.29]) mesh(new THREE.BoxGeometry(0.08, 0.26, 0.68), shell, shovel, x, -0.1, 1.54).rotation.x = -0.28;
+  const handle = new THREE.CapsuleGeometry(0.056, 0.88, 3, 8);
+  handle.rotateX(Math.PI / 2);
+  handle.translate(0, -0.02, 0.56);
+  const knuckle = new THREE.SphereGeometry(0.1, 10, 8);
+  knuckle.translate(0, -0.04, 1.08);
+  const pan = scoopGeometry();
+  const neck = new THREE.CapsuleGeometry(0.05, 0.16, 2, 6);
+  neck.rotateX(Math.PI / 2);
+  neck.translate(0, -0.07, 1.16);
+  neck.deleteAttribute("uv");
+  const rails = [1, -1].map((side) => {
+    const rail = new THREE.CapsuleGeometry(0.02, 0.22, 2, 6);
+    rail.rotateX(Math.PI / 2);
+    rail.translate(0.38 * side, -0.175, 1.48);
+    return rail;
+  });
+  const lamp = new THREE.SphereGeometry(0.034, 8, 6);
+  lamp.translate(0, 0.065, 1.08);
+  toolMesh(merged([collarGeometry(), knuckle]), dark, shovel);
+  toolMesh(merged([handle, ...rails]), shell, shovel);
+  toolMesh(merged([pan, neck]), white, shovel);
+  toolMesh(lamp, glow, shovel);
 
   const brush = tools.brush;
-  for (const x of [-0.38, 0.38]) {
-    const support = mesh(new THREE.BoxGeometry(0.1, 0.13, 1.18), shell, brush, x, -0.04, 0.62); support.rotation.x = -0.08;
-  }
+  const arms = [-0.28, 0.28].map((x) => {
+    const arm = new THREE.CapsuleGeometry(0.042, 0.98, 3, 8);
+    arm.rotateX(Math.PI / 2);
+    arm.translate(x, -0.14, 0.66);
+    return arm;
+  });
+  const caps = [-0.6, 0.6].map((x) => {
+    const cap = new THREE.SphereGeometry(0.09, 8, 6);
+    cap.translate(x, -0.2, 1.18);
+    return cap;
+  });
+  const marker = new THREE.SphereGeometry(0.038, 8, 6);
+  marker.translate(0, 0.02, 0.24);
+  toolMesh(collarGeometry(), dark, brush);
+  toolMesh(merged([...arms, ...caps]), shell, brush);
+  toolMesh(marker, glow, brush);
   const brushSpin = new THREE.Group(); brushSpin.name = "spin"; brushSpin.position.set(0, -0.2, 1.18); brush.add(brushSpin);
-  const roller = mesh(new THREE.CylinderGeometry(0.24, 0.24, 1.45, 14), dark, brushSpin); roller.rotation.z = Math.PI / 2;
-  for (let i = 0; i < 8; i++) { const a = i / 8 * Math.PI * 2; const bristle = mesh(new THREE.BoxGeometry(1.5, 0.055, 0.12), glow, brushSpin, 0, Math.sin(a) * 0.26, Math.cos(a) * 0.26); bristle.rotation.x = a; }
+  const roller = new THREE.CylinderGeometry(0.18, 0.18, 1.02, 14);
+  roller.rotateZ(Math.PI / 2);
+  toolMesh(roller, shell, brushSpin);
+  const fins: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2;
+    const fin = new THREE.BoxGeometry(0.92, 0.035, 0.08);
+    fin.rotateX(angle);
+    fin.translate(0, Math.sin(angle) * 0.22, Math.cos(angle) * 0.22);
+    fins.push(fin);
+  }
+  toolMesh(merged(fins), glow, brushSpin);
 
   const blower = tools.blower;
   mesh(new THREE.BoxGeometry(0.58, 0.5, 0.66), shell, blower, 0, 0.04, 0.34);
